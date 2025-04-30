@@ -1,14 +1,22 @@
-from keras.api.layers import Input, Dense, Flatten, MultiHeadAttention, Concatenate, Add, Permute, Dropout, LayerNormalization, Reshape, Layer
+from keras.api.layers import Input, Dense, MultiHeadAttention, Permute, Dropout, LayerNormalization, Layer
 from keras.api.models import Model, Sequential
 from keras.api.optimizers import Adam
 from keras.api.losses import MeanSquaredError
 from keras.api.metrics import MeanAbsoluteError
 from keras.api.callbacks import EarlyStopping, ModelCheckpoint
 from mne.channels import make_standard_montage, get_builtin_montages
+import keras.api.ops as ops
 import tensorflow as tf
 import numpy as np
 
 def generate_1d_positional_encoding(time_steps, d_model):
+    """
+    Args:
+        time_steps: Total sequence length of a given EEG epoch
+        d_model: Dimension length for the sin/cos time encoding, should be an even number
+    Returns:
+        Tensor with the shape (1, time_steps, d_model)
+    """
     assert d_model % 2 == 0, "d_model must be even for sin/cos encoding."
     pos_encoding = np.zeros((time_steps, d_model))
     for pos in range(time_steps):
@@ -20,6 +28,15 @@ def generate_1d_positional_encoding(time_steps, d_model):
     return tf.constant(pos_encoding, dtype=tf.float32)
 
 def generate_3d_positional_encoding(channel_names, d_model, builtin_montage=None, positions=[]):
+    """
+    Args:
+        channel_names: List of names of EEG electrodes
+        d_model: Dimension length for the 3D sin/cos channel encoding, should be divisible by 3
+        builtin_montage: Name of the montage built into Python-MNE, shouldn't be used if positions is provided
+        positions: 3D coordinates of the electrodes placed on the head in the order of channel names, shouldn't be used if builtin_montage is given
+    Returns:
+        Tensor with the shape (1, len(channel_names), d_model)
+    """
     num_channels = len(channel_names)
     builtin_montages = get_builtin_montages()
     if num_channels == 0:
@@ -50,10 +67,43 @@ def generate_3d_positional_encoding(channel_names, d_model, builtin_montage=None
     pos_encoding = np.expand_dims(pos_encoding, axis=0)
     return tf.constant(pos_encoding, dtype=tf.float32)
 
-def generate_mask_token(number_of_missing_channels, d_model):
-    return tf.expand_dims(tf.Variable(initial_value=tf.zeros((number_of_missing_channels, d_model)), trainable=True), axis=0)
+class MaskTokenExpander(Layer):
+    """Custom layer to properly handle mask token expansion for batch dimensions"""
+    def __init__(self, mask_token, **kwargs):
+        super().__init__(**kwargs)
+        self.mask_token = mask_token
+    
+    def call(self, inputs):
+        batch_size = ops.shape(inputs)[0]
+        return ops.repeat(self.mask_token, batch_size, axis=0)
 
-def estformer_reconstruction_loss(y_true, y_pred, sigma1, sigma2):
+def MaskTokensInsert(lr_channel_names, d_model, hr_channel_names, mask_token):
+    """
+    Args:
+        lr_tensor: KerasTensor of shape (batch_size, lr_channels, time_steps)
+        lr_channel_names: list of low-res EEG channel names
+        hr_channel_names: list of target high-res EEG channel names
+        mask_token: Tensor of shape (1, 1, d_model), will be broadcast across batch
+    Returns:
+        KerasTensor of shape (batch_size, hr_channels, time_steps)
+    """
+    inp = Input((len(lr_channel_names), d_model))
+    lr_dict = {ch: i for i, ch in enumerate(lr_channel_names)}
+    out_list = []
+    mask_expander = MaskTokenExpander(mask_token)
+    batch_reference = inp[:, 0:1, :]
+    for ch in hr_channel_names:
+        if ch in lr_dict:
+            idx = lr_dict[ch]
+            ch_tensor = ops.expand_dims(inp[:, idx, :], axis=1)
+            out_list.append(ch_tensor)
+        else:
+            expanded_mask = mask_expander(batch_reference)
+            out_list.append(expanded_mask)
+    out = ops.concatenate(out_list, axis=1)
+    return Model(inputs=inp, outputs=out, name="MaskTokensInsert")
+
+def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
     """
     Args:
         y_true: (batch_size, channels, time_steps) Ground truth EEG
@@ -120,13 +170,11 @@ def CAB(num_channels, time_steps, num_heads, mlp_dim, name, dropout_rate=0.1, L=
     return Model(inputs=inp, outputs=out, name=name)
 
 # Spatial Interpolation Module
-def SIM(low_res_ch_names, high_res_ch_names, time_steps, d_model, num_heads, mlp_dim, name, dropout_rate=0.1, builtin_montage=None, positions=[], L=1):
-    low_res_ch_count = len(low_res_ch_names)
-    high_res_ch_count = len(high_res_ch_names)
-    missing_ch_count = high_res_ch_count - low_res_ch_count
-    mask_token = generate_mask_token(missing_ch_count, d_model)
-    low_res_3d_pos_encoding  = generate_3d_positional_encoding(channel_names=low_res_ch_names,  d_model=d_model, builtin_montage=builtin_montage, positions=positions)
-    high_res_3d_pos_encoding = generate_3d_positional_encoding(channel_names=high_res_ch_names, d_model=d_model, builtin_montage=builtin_montage, positions=positions)
+def SIM(lr_channel_names, hr_channel_names, mask_token, time_steps, d_model, num_heads, mlp_dim, name, dropout_rate=0.1, builtin_montage=None, positions=[], L=1):
+    low_res_ch_count = len(lr_channel_names)
+    high_res_ch_count = len(hr_channel_names)
+    low_res_3d_pos_encoding  = generate_3d_positional_encoding(channel_names=lr_channel_names,  d_model=d_model, builtin_montage=builtin_montage, positions=positions)
+    high_res_3d_pos_encoding = generate_3d_positional_encoding(channel_names=hr_channel_names, d_model=d_model, builtin_montage=builtin_montage, positions=positions)
     norm1 = LayerNormalization(epsilon=1e-6)
     norm2 = LayerNormalization(epsilon=1e-6)
     dense1 = Dense(d_model, activation='gelu')
@@ -134,13 +182,13 @@ def SIM(low_res_ch_names, high_res_ch_names, time_steps, d_model, num_heads, mlp
     dense3 = Dense(time_steps, activation='gelu')
     cab1 = CAB(name="SIM_CAB1", num_channels=low_res_ch_count,  time_steps=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=L)
     cab2 = CAB(name="SIM_CAB2", num_channels=high_res_ch_count, time_steps=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=L)
-    inp = Input(shape=(len(low_res_ch_names), time_steps))
+    inp = Input(shape=(len(lr_channel_names), time_steps))
     out = inp
     out = dense1(out)
     out = out + low_res_3d_pos_encoding
     out = cab1(out)
     out = norm1(out)
-    out = Concatenate(axis=1)([out, mask_token])
+    out = MaskTokensInsert(lr_channel_names, d_model, hr_channel_names, mask_token)(out) # Concatenate(axis=1)([out, mask_token])
     out = dense2(out)
     out = out + high_res_3d_pos_encoding
     out = cab2(out)
@@ -178,9 +226,11 @@ def TRM(num_channels, time_steps, d_model, num_heads, mlp_dim, name, dropout_rat
     return Model(inputs=inp, outputs=out, name=name)
 
 # ESTFormer Model
-def ESTFormer(low_res_ch_names, high_res_ch_names, builtin_montage, time_steps, d_model, num_heads, mlp_dim, dropout_rate, Ls, Lt):
-    inp = Input(shape=(len(low_res_ch_names), time_steps))
-    sim = SIM(name="ESTFormer_SIM", time_steps=time_steps, d_model=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Ls, builtin_montage=builtin_montage, low_res_ch_names=low_res_ch_names, high_res_ch_names=high_res_ch_names)(inp)
-    trm = TRM(name="ESTFormer_TRM", time_steps=time_steps, d_model=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Lt, num_channels=len(high_res_ch_names))(sim)
+def ESTFormer(lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_model, num_heads, mlp_dim, dropout_rate, Ls, Lt):
+    inp = Input(shape=(len(lr_channel_names), time_steps))
+    mask_token = tf.Variable(initial_value=tf.zeros((1, 1, d_model)), trainable=True, name="mask_token")
+    sim = SIM(name="ESTFormer_SIM", time_steps=time_steps, d_model=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Ls, builtin_montage=builtin_montage, lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=mask_token)(inp)
+    trm = TRM(name="ESTFormer_TRM", time_steps=time_steps, d_model=d_model, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Lt, num_channels=len(hr_channel_names))(sim)
     out = sim + trm
+    out = LayerNormalization(epsilon=1e-6)(out)
     return Model(name="ESTFormer", inputs=inp, outputs=out)
