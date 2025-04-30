@@ -1,2 +1,3 @@
 data/things-eeg/
 env/
+**/__pycache__/
