@@ -1,0 +1,11 @@
+Experiment Details
+Human electroencephalography recordings from 50 subjects for 1,854 concepts and 22,248 images in the THINGS stimulus database.
+Images were presented in rapid serial visual presentation streams at 10Hz rates. Participants performed an orthogonal fixation colour change detection task.
+
+Experiment length: 1 hour
+
+More information: 
+
+https://osf.io/hd6zk/ (osf repository with more information and example analysis code)
+
+Grootswagers, T., Zhou, I., Robinson, A.K. et al. Human EEG recordings for 1,854 concepts presented in rapid serial visual presentation streams. Sci Data 9, 3 (2022). https://doi.org/10.1038/s41597-021-01102-7

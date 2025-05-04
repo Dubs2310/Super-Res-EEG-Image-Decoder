@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import json
 import numpy as np
+import requests
+from PIL import Image
 from typing import Dict, Any
+from transformers import AutoProcessor, TFCLIPModel, logging
+
+logging.set_verbosity_error()
 
 class COCODataHandler:
     """COCO-style image dataset handler
@@ -11,7 +16,12 @@ class COCODataHandler:
     multi-class one-hot label encoding.
 
     Attributes:
-        _captions ()
+        _captions (dict): Dictionary mapping COCO IDs to their respective image captions
+        _categories (dict): Dictionary mapping COCO IDs to their respective categories
+        _urls (dict): Dictionary mappig COCO IDs to their respective image urls
+        _image_embeds (np.array): Numpy array of image embeddings
+        _categories_one_hot (np.array): Numpy array of one-hot encoded categories
+        _category_index (dict): Dictionary mapping categories to their one-hot encoded index
     """
     def __init__(self, annotation: Dict[str, Any], preprocessed: bool=False):
         """Initializes instance of the class from image annotations.
@@ -23,8 +33,12 @@ class COCODataHandler:
         self._captions = {}
         self._categories = {}
         self._urls = {}
+        self._image_embeds = []
 
         self._annotations = annotation
+
+        model = TFCLIPModel.from_pretrained('openai/clip-vit-base-patch32')
+        processor = AutoProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
         for data in annotation:
             coco_id = data['cocoId']
@@ -44,6 +58,13 @@ class COCODataHandler:
             self._categories[coco_id] = categories
             self._urls[coco_id] = url
 
+            image = Image.open(requests.get(url, stream=True).raw)
+            inputs = processor(text=list(captions), images=image, return_tensors="tf", padding=True)
+            outputs = model(**inputs)
+
+            self._image_embeds.append(np.array(outputs.image_embeds).flatten())
+        
+        self._image_embeds = np.array(self._image_embeds)
         self._categories_one_hot, self._category_index = self.onehotencode(list(self._categories.values()))
     
     @property
@@ -90,6 +111,15 @@ class COCODataHandler:
             dict: A dictionary mapping the category to the index in one hot encoding. 
         """
         return self._category_index
+    
+    @property
+    def image_embeds(self) -> np.array:
+        """Returns all image embeddings.
+        
+        Returns:
+            np.array: A 2D numpy array where each row represents an image embedding.
+        """
+        return self._image_embeds
     
     def __getitem__(self, coco_id: int) -> tuple:
         """Access the URL, caption and categories for the specific COCO ID.
@@ -215,5 +245,12 @@ if __name__ == '__main__':
             exit(1)
     
     print(f'Indexing:\t\t\t{PASS}Passed{ENDC}')
+
+    # Test if image embedding shape are accurate 
+    result = len(object.image_embeds.shape) == 2 and object.image_embeds.shape[0] == len(object.captions)
+    if not result:
+        print(f'Image Embedding:\t\t{FAIL}Failed{ENDC}')
+        exit(1)
+    print(f'Image Embedding:\t\t{PASS}Passed{ENDC}')
 
     
