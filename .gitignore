@@ -1,3 +1,4 @@
-data/all-joined-1/
+data/all-joined-1/eeg
+**comprehensive_dataset.h5
 env/
-**/__pycache__/
+**__pycache__/
