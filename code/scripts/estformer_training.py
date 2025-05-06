@@ -11,7 +11,7 @@ from keras.api.metrics import MeanAbsoluteError
 
 # Add the parent directory to the path so we can import our modules
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-print(sys.path[-1])
+# print(sys.path[-1])
 from utils.epoch_data_generator import EpochDataGenerator, OutputType
 from models.ESTformer import ESTFormer, reconstruction_loss
 
@@ -84,7 +84,7 @@ def setup_data_generators(batch_size=32):
     subjects = participants_df.loc[participants_df["exclude"] == 0, "participant_id"].to_list()
     
     # Create subject-epoch coordinates
-    subject_epoch_coordinates = [[subject, coordinate] for subject in subjects for coordinate in range(24648)]
+    subject_epoch_coordinates = [[subject, coordinate] for subject in subjects for coordinate in range(24648) if subject not in ["sub-49", "sub-50"]]
     
     # Split into train, validation, and test sets
     train_coordinates, test_coordinates = train_test_split(subject_epoch_coordinates, test_size=0.3, random_state=42)
@@ -119,8 +119,8 @@ def setup_data_generators(batch_size=32):
                 yield generator[i]
         
         output_signature = (
-            tf.TensorSpec(shape=(len(lr_channel_names), 53), dtype=tf.float32),
-            tf.TensorSpec(shape=(len(hr_channel_names), 53), dtype=tf.float32)
+            tf.TensorSpec(shape=(len(lr_channel_names), 53), dtype=np.float32),
+            tf.TensorSpec(shape=(len(hr_channel_names), 53), dtype=np.float32)
         )
         
         dataset = tf.data.Dataset.from_generator(gen, output_signature=output_signature)

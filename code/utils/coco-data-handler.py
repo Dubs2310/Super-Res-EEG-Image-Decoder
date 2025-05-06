@@ -224,7 +224,7 @@ if __name__ == '__main__':
     ENDC = '\033[0m'
 
     # Test from_file
-    object = COCODataHandler.from_file('./data/all-joined-1/COCO-Train17.json')
+    object = COCODataHandler.from_file('./data/all-joined-1/coco-train17-captions-and-categories.json')
     print(f'Initializing Class From File:\t{PASS}Passed{ENDC}')
 
     # Test One Hot Decoding
