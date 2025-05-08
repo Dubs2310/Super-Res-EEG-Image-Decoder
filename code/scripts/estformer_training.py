@@ -1,153 +1,66 @@
 import os
 import sys
-import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-import tensorflow as tf
-from keras.api.optimizers import Adam
-from keras.api.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
-from keras.api.losses import MeanSquaredError
-from keras.api.metrics import MeanAbsoluteError
+import wandb
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import GPUtil
+import matplotlib.pyplot as plt
 
-# Add the parent directory to the path so we can import our modules
+# Force CUDA to use the GPU
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
+
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-# print(sys.path[-1])
-from utils.epoch_data_generator import EpochDataGenerator, OutputType
 from models.ESTformer import ESTFormer, reconstruction_loss
+from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
 
-# Define available channels
-lr_channel_names = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1', 'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4']
-hr_channel_names = ['Fp1', 'Fz', 'F3', 'F7', 'FT9', 'FC5', 'FC1', 'C3', 'T7', 'TP9', 'CP5', 'CP1', 'Pz', 'P3', 'P7', 'O1', 'Oz', 'O2', 'P4', 'P8', 'TP10', 'CP6', 'CP2', 'C4', 'T8', 'FT10', 'FC6', 'FC2', 'F4', 'F8', 'Fp2', 'AF7', 'AF3', 'AFz', 'F1', 'F5', 'FT7', 'FC3', 'C1', 'C5', 'TP7', 'CP3', 'P1', 'P5', 'PO7', 'PO3', 'POz', 'PO4', 'PO8', 'P6', 'P2', 'CPz', 'CP4', 'TP8', 'C6', 'C2', 'FC4', 'FT8', 'F6', 'AF8', 'AF4', 'F2', 'FCz']
+# Check if CUDA is available
+try:
+    gpus = GPUtil.getGPUs()
+    if gpus:
+        print(f"GPUtil detected {len(gpus)} GPUs:")
+        for i, gpu in enumerate(gpus):
+            print(f"  GPU {i}: {gpu.name} (Memory: {gpu.memoryTotal}MB)")
+        
+        # Set default GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in range(len(gpus))])
+        print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+    else:
+        print("GPUtil found no available GPUs")
+except Exception as e:
+    print(f"Error checking GPUs with GPUtil: {e}")
 
-# Create a custom model class to incorporate the specialized loss function
-class ESTFormerTrainer(tf.keras.Model):
-    def __init__(self, estformer_model):
-        super(ESTFormerTrainer, self).__init__()
-        self.estformer = estformer_model
-        # Initialize learnable parameters for the loss function
-        self.sigma1 = tf.Variable(1.0, dtype=tf.float32, trainable=True, name="sigma1")
-        self.sigma2 = tf.Variable(1.0, dtype=tf.float32, trainable=True, name="sigma2")
-        
-    def call(self, inputs, training=None):
-        return self.estformer(inputs)
-    
-    def train_step(self, data):
-        x, y = data
-        
-        with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)
-            loss = reconstruction_loss(y, y_pred, self.sigma1, self.sigma2)
-            
-        # Compute gradients
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-        
-        # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-        
-        # Compute metrics
-        mse = tf.reduce_mean(tf.square(y - y_pred))
-        mae = tf.reduce_mean(tf.abs(y - y_pred))
-        
-        # Return metrics
-        return {
-            "loss": loss, 
-            "mse": mse, 
-            "mae": mae, 
-            "sigma1": self.sigma1, 
-            "sigma2": self.sigma2
-        }
-    
-    def test_step(self, data):
-        x, y = data
-        y_pred = self(x, training=False)
-        loss = reconstruction_loss(y, y_pred, self.sigma1, self.sigma2)
-        
-        # Compute metrics
-        mse = tf.reduce_mean(tf.square(y - y_pred))
-        mae = tf.reduce_mean(tf.abs(y - y_pred))
-        
-        # Return metrics
-        return {
-            "loss": loss, 
-            "mse": mse, 
-            "mae": mae, 
-            "sigma1": self.sigma1, 
-            "sigma2": self.sigma2
-        }
+class SigmaParameters(nn.Module):
+    """Class to hold trainable sigma parameters"""
+    def __init__(self):
+        super().__init__()
+        self.sigma1 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.sigma2 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
 
-# Set up data generators
-def setup_data_generators(batch_size=32):
-    """Set up training, validation, and test data generators"""
-    participants_file = os.path.join(EpochDataGenerator.data_dir(), "participants.tsv")
-    participants_df = pd.read_csv(participants_file, sep="\t")
-    subjects = participants_df.loc[participants_df["exclude"] == 0, "participant_id"].to_list()
+def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_model=64, num_heads=4, mlp_dim=128, dropout_rate=0.1, Ls=2, Lt=2, builtin_montage='standard_1020'):
+    """
+    Create the ESTformer model with trainable sigma parameters.
     
-    # Create subject-epoch coordinates
-    subject_epoch_coordinates = [[subject, coordinate] for subject in subjects for coordinate in range(24648) if subject not in ["sub-49", "sub-50"]]
-    
-    # Split into train, validation, and test sets
-    train_coordinates, test_coordinates = train_test_split(subject_epoch_coordinates, test_size=0.3, random_state=42)
-    test_coordinates, validation_coordinates = train_test_split(test_coordinates, test_size=0.66, random_state=42)
-    
-    # Create data generators with super resolution output type
-    train_generator = EpochDataGenerator(
-        train_coordinates, 
-        lr_channel_names=lr_channel_names, 
-        hr_channel_names=hr_channel_names,
-        output_type=OutputType.SUPER_RESOLUTION
-    )
-    
-    validation_generator = EpochDataGenerator(
-        validation_coordinates, 
-        lr_channel_names=lr_channel_names, 
-        hr_channel_names=hr_channel_names,
-        output_type=OutputType.SUPER_RESOLUTION
-    )
-    
-    test_generator = EpochDataGenerator(
-        test_coordinates, 
-        lr_channel_names=lr_channel_names, 
-        hr_channel_names=hr_channel_names,
-        output_type=OutputType.SUPER_RESOLUTION
-    )
-    
-    # Set up tf.data.Dataset with batching for efficient training
-    def generator_to_dataset(generator, batch_size):
-        def gen():
-            for i in range(len(generator)):
-                yield generator[i]
+    Args:
+        lr_channel_names: List of low-resolution channel names
+        hr_channel_names: List of high-resolution channel names
+        time_steps: Number of time steps in each epoch
+        d_model: Dimension of the model
+        num_heads: Number of attention heads
+        mlp_dim: Dimension of MLP layers
+        dropout_rate: Dropout rate
+        Ls: Number of spatial layers
+        Lt: Number of temporal layers
+        builtin_montage: Name of the montage to use
         
-        output_signature = (
-            tf.TensorSpec(shape=(len(lr_channel_names), 53), dtype=np.float32),
-            tf.TensorSpec(shape=(len(hr_channel_names), 53), dtype=np.float32)
-        )
-        
-        dataset = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
-        dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        return dataset
-    
-    train_dataset = generator_to_dataset(train_generator, batch_size)
-    val_dataset = generator_to_dataset(validation_generator, batch_size)
-    test_dataset = generator_to_dataset(test_generator, batch_size)
-    
-    return train_dataset, val_dataset, test_dataset, train_generator, validation_generator, test_generator
-
-# Set up the model with optimal parameters
-def create_model():
-    """Create the ESTFormer model"""
-    # Model hyperparameters
-    time_steps = 53
-    d_model = 60
-    num_heads = 4
-    mlp_dim = 128
-    dropout_rate = 0.1
-    Ls = 1  # Number of spatial layers
-    Lt = 1  # Number of temporal layers
-    builtin_montage = 'standard_1020'
-    
-    # Create the base model
-    base_model = ESTFormer(
+    Returns:
+        ESTformer model, sigmas module
+    """
+    # Create the model
+    model = ESTFormer(
         lr_channel_names=lr_channel_names,
         hr_channel_names=hr_channel_names,
         builtin_montage=builtin_montage,
@@ -160,96 +73,1332 @@ def create_model():
         Lt=Lt
     )
     
-    # Create the trainer model with custom loss
-    model = ESTFormerTrainer(base_model)
+    # Create trainable sigma parameters for the loss function
+    sigmas = SigmaParameters()
     
-    # Compile the model
-    optimizer = Adam(learning_rate=0.001)
-    model.compile(optimizer=optimizer)
-    
-    return model
+    return model, sigmas
 
-def train_model(model, train_dataset, val_dataset, epochs=100, model_dir='models'):
-    """Train the model and save checkpoints"""
-    # Create model directory if it doesn't exist
-    os.makedirs(model_dir, exist_ok=True)
+def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=32, test_size=0.2, event_duration=60):
+    """
+    Create data loaders for training and validation.
     
-    # Set up callbacks
-    checkpoint_path = os.path.join(model_dir, 'estformer_best_model.h5')
-    callbacks = [
-        EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True,
-            verbose=1
-        ),
-        ModelCheckpoint(
-            filepath=checkpoint_path,
-            monitor='val_loss',
-            save_best_only=True,
-            verbose=1
-        ),
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-6,
-            verbose=1
-        ),
-        TensorBoard(
-            log_dir=os.path.join(model_dir, 'logs'),
-            histogram_freq=1
-        )
-    ]
-    
-    # Train the model
-    history = model.fit(
-        train_dataset,
-        validation_data=val_dataset,
-        epochs=epochs,
-        callbacks=callbacks,
-        verbose=1
+    Args:
+        lr_channel_names: List of low-resolution channel names
+        hr_channel_names: List of high-resolution channel names
+        batch_size: Batch size
+        test_size: Fraction of data to use for validation
+        event_duration: Duration of each event in seconds
+        
+    Returns:
+        Training and validation data loaders
+    """
+    train_dataset = HDF5DataSplitGenerator(
+        dataset_type="train",
+        test_size=test_size,
+        event_mode="fixed_length_event",
+        event_duration=event_duration,
+        lr_channel_names=lr_channel_names,
+        hr_channel_names=hr_channel_names
     )
     
-    return history, model
+    val_dataset = HDF5DataSplitGenerator(
+        dataset_type="test",
+        test_size=test_size,
+        event_mode="fixed_length_event",
+        event_duration=event_duration,
+        lr_channel_names=lr_channel_names,
+        hr_channel_names=hr_channel_names
+    )
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader
 
-def evaluate_model(model, test_dataset):
-    """Evaluate the trained model on the test dataset"""
-    results = model.evaluate(test_dataset, verbose=1)
-    print(f"Test results: {results}")
-    return results
+def compute_mean_absolute_error(y_true, y_pred):
+    """Compute Mean Absolute Error"""
+    return torch.mean(torch.abs(y_true - y_pred))
 
-def save_model(model, model_path):
-    """Save the trained model to disk"""
-    # Save the base ESTFormer model (more useful than the trainer)
-    model.estformer.save(model_path)
-    print(f"Model saved to {model_path}")
+def train_estformer(model, train_loader, val_loader, sigmas, device, lr=1e-4, epochs=100, checkpoint_dir='checkpoints'):
+    """
+    Train the ESTformer model.
+    
+    Args:
+        model: ESTformer model
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        sigmas: SigmaParameters module
+        device: Device to train on (cuda/cpu)
+        lr: Learning rate
+        epochs: Number of epochs to train for
+        checkpoint_dir: Directory to save checkpoints
+        
+    Returns:
+        Training history
+    """
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Initialize wandb
+    config = {
+        "model": "ESTformer",
+        "lr_channels": len(train_loader.dataset.lr_indices) if train_loader.dataset.lr_indices is not None else len(train_loader.dataset.ch_names),
+        "hr_channels": len(train_loader.dataset.hr_indices) if train_loader.dataset.hr_indices is not None else len(train_loader.dataset.ch_names),
+        "d_model": model.sim.dense1.in_features,
+        "num_heads": model.sim.cab1.blocks[0]['tsab1'].layers[0]['attn'].num_heads,
+        "mlp_dim": model.sim.cab1.blocks[0]['tsab1'].layers[0]['mlp'][0].out_features,
+        "dropout_rate": model.sim.cab1.blocks[0]['tsab1'].layers[0]['dropout1'].p,
+        "Ls": len(model.sim.cab1.blocks),
+        "Lt": len(model.trm.tsab1.layers),
+        "batch_size": train_loader.batch_size,
+        "epochs": epochs,
+        "optimizer": "Adam",
+        "learning_rate": lr,
+    }
+    
+    wandb.init(project="eeg-estformer", config=config)
+    
+    # Create optimizer with both model and sigma parameters
+    optimizer = optim.Adam([
+        {'params': model.parameters()},
+        {'params': sigmas.parameters()}
+    ], lr=lr)
+    
+    # Initialize tracking variables
+    best_val_loss = float('inf')
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'train_mae': [],
+        'val_mae': [],
+        'sigma1': [],
+        'sigma2': []
+    }
+    
+    # Training loop
+    for epoch in range(epochs):
+        model.train()
+        sigmas.train()
+        train_losses = []
+        train_maes = []
+        
+        # Training phase
+        for i, batch in enumerate(train_loader.dataset):
+            lo_res = torch.from_numpy(batch['lo_res_epoch_batch']).float().to(device)
+            hi_res = torch.from_numpy(batch['hi_res_epoch_batch']).float().to(device)
+            
+            # Forward pass
+            optimizer.zero_grad()
+            outputs = model(lo_res)
+            
+            # Compute loss
+            loss = reconstruction_loss(hi_res, outputs, sigmas.sigma1, sigmas.sigma2)
+            mae = compute_mean_absolute_error(hi_res, outputs)
+            
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
+            
+            # Track metrics
+            train_losses.append(loss.item())
+            train_maes.append(mae.item())
+            
+            # Log batch progress
+            if i % 10 == 0:
+                print(f"Epoch {epoch+1}/{epochs}, Batch {i}/{len(train_loader)}, "
+                      f"Loss: {loss.item():.4f}, MAE: {mae.item():.4f}")
+        
+        # Compute epoch metrics
+        avg_train_loss = np.mean(train_losses)
+        avg_train_mae = np.mean(train_maes)
+        
+        # Validation phase
+        model.eval()
+        sigmas.eval()
+        val_losses = []
+        val_maes = []
+        
+        with torch.no_grad():
+            for batch in val_loader.dataset:
+                lo_res = torch.from_numpy(batch['lo_res_epoch_batch']).float().to(device)
+                hi_res = torch.from_numpy(batch['hi_res_epoch_batch']).float().to(device)
+                
+                # Forward pass
+                outputs = model(lo_res)
+                
+                # Compute loss
+                loss = reconstruction_loss(hi_res, outputs, sigmas.sigma1, sigmas.sigma2)
+                mae = compute_mean_absolute_error(hi_res, outputs)
+                
+                # Track metrics
+                val_losses.append(loss.item())
+                val_maes.append(mae.item())
+        
+        # Compute epoch metrics
+        avg_val_loss = np.mean(val_losses)
+        avg_val_mae = np.mean(val_maes)
+        
+        # Update history
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['train_mae'].append(avg_train_mae)
+        history['val_mae'].append(avg_val_mae)
+        history['sigma1'].append(sigmas.sigma1.item())
+        history['sigma2'].append(sigmas.sigma2.item())
+        
+        # Log metrics to wandb
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss,
+            "train_mae": avg_train_mae,
+            "val_mae": avg_val_mae,
+            "sigma1": sigmas.sigma1.item(),
+            "sigma2": sigmas.sigma2.item()
+        })
+        
+        # Print epoch summary
+        print(f"Epoch {epoch+1}/{epochs}, "
+              f"Train Loss: {avg_train_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, "
+              f"Train MAE: {avg_train_mae:.4f}, "
+              f"Val MAE: {avg_val_mae:.4f}, "
+              f"Sigma1: {sigmas.sigma1.item():.4f}, "
+              f"Sigma2: {sigmas.sigma2.item():.4f}")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            checkpoint_path = os.path.join(checkpoint_dir, f'estformer_best.pt')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'sigmas_state_dict': sigmas.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+            }, checkpoint_path)
+            
+            print(f"Saved best model checkpoint to {checkpoint_path}")
+            # Log best model to wandb
+            wandb.save(checkpoint_path)
+        
+        # Save periodic checkpoint
+        if (epoch + 1) % 5 == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'estformer_epoch_{epoch+1}.pt')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'sigmas_state_dict': sigmas.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+            }, checkpoint_path)
+    
+    # Close wandb run
+    wandb.finish()
+    
+    return history
 
-if __name__ == "__main__":
-    # Set batch size
-    BATCH_SIZE = 32
-    EPOCHS = 100
-    MODEL_DIR = "models"
+def visualize_results(model, val_dataset, device, subject_idx=0, channel_idx=0):
+    """
+    Visualize the results of the model on a validation sample.
     
-    # Set up data generators and datasets
-    train_dataset, val_dataset, test_dataset, train_gen, val_gen, test_gen = setup_data_generators(BATCH_SIZE)
+    Args:
+        model: Trained ESTformer model
+        val_dataset: Validation dataset
+        device: Device to run inference on
+        subject_idx: Index of the subject to visualize
+        channel_idx: Index of the channel to visualize
+    """
+    # Set model to eval mode
+    model.eval()
     
-    # Print shape information
-    print(f"Training dataset input shape: {train_gen.get_input_shape()}")
-    print(f"Training dataset output shape: {train_gen.get_output_shape()}")
+    # Get a validation sample
+    sample = val_dataset.get_item_at_index(subject_idx)
     
-    # Create and summarize model
-    model = create_model()
-    model.build(input_shape=(None, len(lr_channel_names), 53))
-    model.summary()
+    # Convert to tensors and add batch dimension
+    lo_res = torch.tensor(sample['lo_res_epoch_data'], dtype=torch.float32).unsqueeze(0).to(device)
+    hi_res = torch.tensor(sample['hi_res_epoch_data'], dtype=torch.float32)
     
-    # Train model
-    history, trained_model = train_model(model, train_dataset, val_dataset, epochs=EPOCHS, model_dir=MODEL_DIR)
+    # Get predictions
+    with torch.no_grad():
+        pred = model(lo_res).cpu().numpy()[0]
     
-    # Evaluate model
-    eval_results = evaluate_model(trained_model, test_dataset)
+    # Convert back to numpy for visualization
+    lo_res = lo_res.cpu().numpy()[0]
+    hi_res = hi_res.numpy()
     
-    # Save the trained model
-    save_model(trained_model, os.path.join(MODEL_DIR, "estformer_final_model.h5"))
+    # Plot the results
+    plt.figure(figsize=(12, 8))
+    
+    # Plot low-res input
+    plt.subplot(3, 1, 1)
+    plt.plot(lo_res[channel_idx])
+    plt.title(f'Low-Res Input (Channel {channel_idx})')
+    
+    # Plot high-res ground truth
+    plt.subplot(3, 1, 2)
+    plt.plot(hi_res[channel_idx])
+    plt.title(f'High-Res Ground Truth (Channel {channel_idx})')
+    
+    # Plot prediction
+    plt.subplot(3, 1, 3)
+    plt.plot(pred[channel_idx])
+    plt.title(f'Model Prediction (Channel {channel_idx})')
+    
+    plt.tight_layout()
+    
+    # Save figure to wandb
+    if wandb.run is not None:
+        wandb.log({"prediction_visualization": wandb.Image(plt)})
+    
+    plt.show()
+
+def monitor_sigma_values_and_loss(history):
+    """
+    Monitor the values of sigma1 and sigma2 during training.
+    
+    Args:
+        history: Training history dictionary
+    """
+    # Get the values of sigma1 and sigma2
+    sigma1_values = history['sigma1']
+    sigma2_values = history['sigma2']
+    
+    print(f"Final sigma1 value: {sigma1_values[-1]}")
+    print(f"Final sigma2 value: {sigma2_values[-1]}")
+    
+    # Plot the loss history
+    plt.figure(figsize=(12, 8))
+    
+    # Plot loss
+    plt.subplot(2, 2, 1)
+    plt.plot(history['train_loss'], label='Training Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    # Plot MAE
+    plt.subplot(2, 2, 2)
+    plt.plot(history['train_mae'], label='Training MAE')
+    plt.plot(history['val_mae'], label='Validation MAE')
+    plt.title('Model MAE')
+    plt.xlabel('Epoch')
+    plt.ylabel('MAE')
+    plt.legend()
+    
+    # Plot sigma values
+    plt.subplot(2, 2, 3)
+    plt.plot(sigma1_values, label='Sigma1')
+    plt.title('Sigma1 Value')
+    plt.xlabel('Epoch')
+    plt.ylabel('Value')
+    
+    plt.subplot(2, 2, 4)
+    plt.plot(sigma2_values, label='Sigma2')
+    plt.title('Sigma2 Value')
+    plt.xlabel('Epoch')
+    plt.ylabel('Value')
+    
+    plt.tight_layout()
+    
+    # Save figure to wandb
+    if wandb.run is not None:
+        wandb.log({"training_history": wandb.Image(plt)})
+    
+    plt.show()
+
+def main():
+    # Check for CUDA availability
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Define parameters
+    all_channels = ['Fp1', 'AF7', 'AF3', 'F1', 'F3', 'F5', 'F7', 'FT7', 'FC5', 'FC3', 'FC1', 'C1', 'C3', 'C5', 'T7', 'TP7', 'CP5', 'CP3', 'CP1', 'P1', 'P3', 'P5', 'P7', 'P9', 'PO7', 'PO3', 'O1', 'Iz', 'Oz', 'POz', 'Pz', 'CPz', 'Fpz', 'Fp2', 'AF8', 'AF4', 'AFz', 'Fz', 'F2', 'F4', 'F6', 'F8', 'FT8', 'FC6', 'FC4', 'FC2', 'FCz', 'Cz', 'C2', 'C4', 'C6', 'T8', 'TP8', 'CP6', 'CP4', 'CP2', 'P2', 'P4', 'P6', 'P8', 'P10', 'PO8', 'PO4', 'O2']
+
+    # Low-resolution setup (fewer channels)
+    lr_channel_names = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1', 'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4']
+    
+    # High-resolution setup (all channels)
+    hr_channel_names = all_channels
+    
+    # Training parameters
+    batch_size = 1
+    epochs = 50
+    
+    # Create data loaders
+    train_loader, val_loader = get_data_loaders(
+        lr_channel_names=lr_channel_names,
+        hr_channel_names=hr_channel_names,
+        batch_size=batch_size
+    )
+    
+    # Get sample data to determine time_steps
+    sample_item = train_loader.dataset.get_item_at_index(0)
+    time_steps = sample_item["lo_res_epoch_item"].shape[1]
+    
+    # Model parameters
+    d_model = 60
+    num_heads = 2
+    mlp_dim = 128
+    dropout_rate = 0.1
+    Ls = 1  # Number of spatial layers
+    Lt = 1  # Number of temporal layers
+    
+    # Create the model
+    model, sigmas = create_estformer_model(
+        lr_channel_names=lr_channel_names,
+        hr_channel_names=hr_channel_names,
+        time_steps=time_steps,
+        d_model=d_model,
+        num_heads=num_heads,
+        mlp_dim=mlp_dim,
+        dropout_rate=dropout_rate,
+        Ls=Ls,
+        Lt=Lt
+    )
+    
+    # Move model to device
+    model = model.to(device)
+    sigmas = sigmas.to(device)
+    
+    # Print model summary
+    print(model)
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    
+    # Train the model
+    history = train_estformer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        sigmas=sigmas,
+        device=device,
+        lr=1e-4,
+        epochs=epochs
+    )
+    
+    # Monitor sigma values and loss
+    monitor_sigma_values_and_loss(history)
+    
+    # Visualize results
+    visualize_results(model, val_loader.dataset, device)
     
     print("Training completed successfully!")
+
+if __name__ == "__main__":
+    main()
+
+# import os
+# import sys
+# import numpy as np
+# import wandb
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+# from torch.utils.data import DataLoader
+# import GPUtil
+# import matplotlib.pyplot as plt
+
+# # Force CUDA to use the GPU
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
+
+# sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# from models.ESTformer import ESTFormer, reconstruction_loss
+# from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
+
+# # Check if CUDA is available
+# try:
+#     gpus = GPUtil.getGPUs()
+#     if gpus:
+#         print(f"GPUtil detected {len(gpus)} GPUs:")
+#         for i, gpu in enumerate(gpus):
+#             print(f"  GPU {i}: {gpu.name} (Memory: {gpu.memoryTotal}MB)")
+        
+#         # Set default GPU
+#         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in range(len(gpus))])
+#         print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+#     else:
+#         print("GPUtil found no available GPUs")
+# except Exception as e:
+#     print(f"Error checking GPUs with GPUtil: {e}")
+
+# def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_model=64, num_heads=4, mlp_dim=128, dropout_rate=0.1, Ls=2, Lt=2, builtin_montage='standard_1020'):
+#     """
+#     Create the ESTformer model with trainable sigma parameters.
+    
+#     Args:
+#         lr_channel_names: List of low-resolution channel names
+#         hr_channel_names: List of high-resolution channel names
+#         time_steps: Number of time steps in each epoch
+#         d_model: Dimension of the model
+#         num_heads: Number of attention heads
+#         mlp_dim: Dimension of MLP layers
+#         dropout_rate: Dropout rate
+#         Ls: Number of spatial layers
+#         Lt: Number of temporal layers
+#         builtin_montage: Name of the montage to use
+        
+#     Returns:
+#         ESTformer model, sigma1, sigma2 parameters
+#     """
+#     # Create the model
+#     model = ESTFormer(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         builtin_montage=builtin_montage,
+#         time_steps=time_steps,
+#         d_model=d_model,
+#         num_heads=num_heads,
+#         mlp_dim=mlp_dim,
+#         dropout_rate=dropout_rate,
+#         Ls=Ls,
+#         Lt=Lt
+#     )
+    
+#     # Create trainable sigma parameters for the loss function
+#     sigma1 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+#     sigma2 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+    
+#     return model, sigma1, sigma2
+
+# def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=32, test_size=0.2, event_duration=60):
+#     """
+#     Create data loaders for training and validation.
+    
+#     Args:
+#         lr_channel_names: List of low-resolution channel names
+#         hr_channel_names: List of high-resolution channel names
+#         batch_size: Batch size
+#         test_size: Fraction of data to use for validation
+#         event_duration: Duration of each event in seconds
+        
+#     Returns:
+#         Training and validation data loaders
+#     """
+#     train_dataset = HDF5DataSplitGenerator(
+#         dataset_type="train",
+#         test_size=test_size,
+#         event_mode="fixed_length_event",
+#         event_duration=event_duration,
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names
+#     )
+    
+#     val_dataset = HDF5DataSplitGenerator(
+#         dataset_type="test",
+#         test_size=test_size,
+#         event_mode="fixed_length_event",
+#         event_duration=event_duration,
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names
+#     )
+    
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=batch_size,
+#         shuffle=True,
+#         num_workers=4,
+#         pin_memory=True
+#     )
+    
+#     val_loader = DataLoader(
+#         val_dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=4,
+#         pin_memory=True
+#     )
+    
+#     return train_loader, val_loader
+
+# def compute_mean_absolute_error(y_true, y_pred):
+#     """Compute Mean Absolute Error"""
+#     return torch.mean(torch.abs(y_true - y_pred))
+
+# def train_estformer(model, train_loader, val_loader, sigma1, sigma2, device, lr=1e-4, epochs=100, checkpoint_dir='checkpoints'):
+#     """
+#     Train the ESTformer model.
+    
+#     Args:
+#         model: ESTformer model
+#         train_loader: Training data loader
+#         val_loader: Validation data loader
+#         sigma1: Sigma1 parameter
+#         sigma2: Sigma2 parameter
+#         device: Device to train on (cuda/cpu)
+#         lr: Learning rate
+#         epochs: Number of epochs to train for
+#         checkpoint_dir: Directory to save checkpoints
+        
+#     Returns:
+#         Training history
+#     """
+#     # Create checkpoint directory if it doesn't exist
+#     os.makedirs(checkpoint_dir, exist_ok=True)
+    
+#     # Initialize wandb
+#     config = {
+#         "model": "ESTformer",
+#         "lr_channels": len(train_loader.dataset.lr_indices) if train_loader.dataset.lr_indices is not None else len(train_loader.dataset.ch_names),
+#         "hr_channels": len(train_loader.dataset.hr_indices) if train_loader.dataset.hr_indices is not None else len(train_loader.dataset.ch_names),
+#         "d_model": model.sim.dense1.in_features,
+#         "num_heads": model.sim.cab1.blocks[0]['tsab1'].layers[0]['attn'].num_heads,
+#         "mlp_dim": model.sim.cab1.blocks[0]['tsab1'].layers[0]['mlp'][0].out_features,
+#         "dropout_rate": model.sim.cab1.blocks[0]['tsab1'].layers[0]['dropout1'].p,
+#         "Ls": len(model.sim.cab1.blocks),
+#         "Lt": len(model.trm.tsab1.layers),
+#         "batch_size": train_loader.batch_size,
+#         "epochs": epochs,
+#         "optimizer": "Adam",
+#         "learning_rate": lr,
+#     }
+    
+#     wandb.init(project="eeg-estformer", config=config)
+    
+#     # Create optimizer
+#     # Include sigma parameters in the optimizer
+#     optimizer = optim.Adam([
+#         {'params': model.parameters()},
+#         {'params': [sigma1, sigma2]}
+#     ], lr=lr)
+    
+#     # Initialize tracking variables
+#     best_val_loss = float('inf')
+#     history = {
+#         'train_loss': [],
+#         'val_loss': [],
+#         'train_mae': [],
+#         'val_mae': [],
+#         'sigma1': [],
+#         'sigma2': []
+#     }
+    
+#     # Training loop
+#     for epoch in range(epochs):
+#         model.train()
+#         train_losses = []
+#         train_maes = []
+        
+#         # Training phase
+#         for i, batch in enumerate(train_loader):
+#             lo_res = batch['lo_res_epoch_batch'].to(device)
+#             hi_res = batch['hi_res_epoch_batch'].to(device)
+            
+#             # Forward pass
+#             optimizer.zero_grad()
+#             outputs = model(lo_res)
+            
+#             # Compute loss
+#             loss = reconstruction_loss(hi_res, outputs, sigma1, sigma2)
+#             mae = compute_mean_absolute_error(hi_res, outputs)
+            
+#             # Backward pass and optimization
+#             loss.backward()
+#             optimizer.step()
+            
+#             # Track metrics
+#             train_losses.append(loss.item())
+#             train_maes.append(mae.item())
+            
+#             # Log batch progress
+#             if i % 10 == 0:
+#                 print(f"Epoch {epoch+1}/{epochs}, Batch {i}/{len(train_loader)}, "
+#                       f"Loss: {loss.item():.4f}, MAE: {mae.item():.4f}")
+        
+#         # Compute epoch metrics
+#         avg_train_loss = np.mean(train_losses)
+#         avg_train_mae = np.mean(train_maes)
+        
+#         # Validation phase
+#         model.eval()
+#         val_losses = []
+#         val_maes = []
+        
+#         with torch.no_grad():
+#             for batch in val_loader:
+#                 lo_res = batch['lo_res_epoch_batch'].to(device)
+#                 hi_res = batch['hi_res_epoch_batch'].to(device)
+                
+#                 # Forward pass
+#                 outputs = model(lo_res)
+                
+#                 # Compute loss
+#                 loss = reconstruction_loss(hi_res, outputs, sigma1, sigma2)
+#                 mae = compute_mean_absolute_error(hi_res, outputs)
+                
+#                 # Track metrics
+#                 val_losses.append(loss.item())
+#                 val_maes.append(mae.item())
+        
+#         # Compute epoch metrics
+#         avg_val_loss = np.mean(val_losses)
+#         avg_val_mae = np.mean(val_maes)
+        
+#         # Update history
+#         history['train_loss'].append(avg_train_loss)
+#         history['val_loss'].append(avg_val_loss)
+#         history['train_mae'].append(avg_train_mae)
+#         history['val_mae'].append(avg_val_mae)
+#         history['sigma1'].append(sigma1.item())
+#         history['sigma2'].append(sigma2.item())
+        
+#         # Log metrics to wandb
+#         wandb.log({
+#             "epoch": epoch + 1,
+#             "train_loss": avg_train_loss,
+#             "val_loss": avg_val_loss,
+#             "train_mae": avg_train_mae,
+#             "val_mae": avg_val_mae,
+#             "sigma1": sigma1.item(),
+#             "sigma2": sigma2.item()
+#         })
+        
+#         # Print epoch summary
+#         print(f"Epoch {epoch+1}/{epochs}, "
+#               f"Train Loss: {avg_train_loss:.4f}, "
+#               f"Val Loss: {avg_val_loss:.4f}, "
+#               f"Train MAE: {avg_train_mae:.4f}, "
+#               f"Val MAE: {avg_val_mae:.4f}, "
+#               f"Sigma1: {sigma1.item():.4f}, "
+#               f"Sigma2: {sigma2.item():.4f}")
+        
+#         # Save best model
+#         if avg_val_loss < best_val_loss:
+#             best_val_loss = avg_val_loss
+#             checkpoint_path = os.path.join(checkpoint_dir, f'estformer_best.pt')
+#             torch.save({
+#                 'epoch': epoch,
+#                 'model_state_dict': model.state_dict(),
+#                 'optimizer_state_dict': optimizer.state_dict(),
+#                 'sigma1': sigma1,
+#                 'sigma2': sigma2,
+#                 'val_loss': avg_val_loss,
+#             }, checkpoint_path)
+            
+#             print(f"Saved best model checkpoint to {checkpoint_path}")
+#             # Log best model to wandb
+#             wandb.save(checkpoint_path)
+        
+#         # Save periodic checkpoint
+#         if (epoch + 1) % 5 == 0:
+#             checkpoint_path = os.path.join(checkpoint_dir, f'estformer_epoch_{epoch+1}.pt')
+#             torch.save({
+#                 'epoch': epoch,
+#                 'model_state_dict': model.state_dict(),
+#                 'optimizer_state_dict': optimizer.state_dict(),
+#                 'sigma1': sigma1,
+#                 'sigma2': sigma2,
+#                 'val_loss': avg_val_loss,
+#             }, checkpoint_path)
+    
+#     # Close wandb run
+#     wandb.finish()
+    
+#     return history
+
+# def visualize_results(model, val_dataset, device, subject_idx=0, channel_idx=0):
+#     """
+#     Visualize the results of the model on a validation sample.
+    
+#     Args:
+#         model: Trained ESTformer model
+#         val_dataset: Validation dataset
+#         device: Device to run inference on
+#         subject_idx: Index of the subject to visualize
+#         channel_idx: Index of the channel to visualize
+#     """
+#     # Set model to eval mode
+#     model.eval()
+    
+#     # Get a validation sample
+#     sample = val_dataset.get_item_at_index(subject_idx)
+    
+#     # Convert to tensors and add batch dimension
+#     lo_res = torch.tensor(sample['lo_res_epoch_data'], dtype=torch.float32).unsqueeze(0).to(device)
+#     hi_res = torch.tensor(sample['hi_res_epoch_data'], dtype=torch.float32)
+    
+#     # Get predictions
+#     with torch.no_grad():
+#         pred = model(lo_res).cpu().numpy()[0]
+    
+#     # Convert back to numpy for visualization
+#     lo_res = lo_res.cpu().numpy()[0]
+#     hi_res = hi_res.numpy()
+    
+#     # Plot the results
+#     plt.figure(figsize=(12, 8))
+    
+#     # Plot low-res input
+#     plt.subplot(3, 1, 1)
+#     plt.plot(lo_res[channel_idx])
+#     plt.title(f'Low-Res Input (Channel {channel_idx})')
+    
+#     # Plot high-res ground truth
+#     plt.subplot(3, 1, 2)
+#     plt.plot(hi_res[channel_idx])
+#     plt.title(f'High-Res Ground Truth (Channel {channel_idx})')
+    
+#     # Plot prediction
+#     plt.subplot(3, 1, 3)
+#     plt.plot(pred[channel_idx])
+#     plt.title(f'Model Prediction (Channel {channel_idx})')
+    
+#     plt.tight_layout()
+    
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"prediction_visualization": wandb.Image(plt)})
+    
+#     plt.show()
+
+# def monitor_sigma_values_and_loss(history):
+#     """
+#     Monitor the values of sigma1 and sigma2 during training.
+    
+#     Args:
+#         history: Training history dictionary
+#     """
+#     # Get the values of sigma1 and sigma2
+#     sigma1_values = history['sigma1']
+#     sigma2_values = history['sigma2']
+    
+#     print(f"Final sigma1 value: {sigma1_values[-1]}")
+#     print(f"Final sigma2 value: {sigma2_values[-1]}")
+    
+#     # Plot the loss history
+#     plt.figure(figsize=(12, 8))
+    
+#     # Plot loss
+#     plt.subplot(2, 2, 1)
+#     plt.plot(history['train_loss'], label='Training Loss')
+#     plt.plot(history['val_loss'], label='Validation Loss')
+#     plt.title('Model Loss')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Loss')
+#     plt.legend()
+    
+#     # Plot MAE
+#     plt.subplot(2, 2, 2)
+#     plt.plot(history['train_mae'], label='Training MAE')
+#     plt.plot(history['val_mae'], label='Validation MAE')
+#     plt.title('Model MAE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('MAE')
+#     plt.legend()
+    
+#     # Plot sigma values
+#     plt.subplot(2, 2, 3)
+#     plt.plot(sigma1_values, label='Sigma1')
+#     plt.title('Sigma1 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
+    
+#     plt.subplot(2, 2, 4)
+#     plt.plot(sigma2_values, label='Sigma2')
+#     plt.title('Sigma2 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
+    
+#     plt.tight_layout()
+    
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"training_history": wandb.Image(plt)})
+    
+#     plt.show()
+
+# def main():
+#     # Check for CUDA availability
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     print(f"Using device: {device}")
+    
+#     # Define parameters
+#     all_channels = ['Fp1', 'AF7', 'AF3', 'F1', 'F3', 'F5', 'F7', 'FT7', 'FC5', 'FC3', 'FC1', 'C1', 'C3', 'C5', 'T7', 'TP7', 'CP5', 'CP3', 'CP1', 'P1', 'P3', 'P5', 'P7', 'P9', 'PO7', 'PO3', 'O1', 'Iz', 'Oz', 'POz', 'Pz', 'CPz', 'Fpz', 'Fp2', 'AF8', 'AF4', 'AFz', 'Fz', 'F2', 'F4', 'F6', 'F8', 'FT8', 'FC6', 'FC4', 'FC2', 'FCz', 'Cz', 'C2', 'C4', 'C6', 'T8', 'TP8', 'CP6', 'CP4', 'CP2', 'P2', 'P4', 'P6', 'P8', 'P10', 'PO8', 'PO4', 'O2']
+
+#     # Low-resolution setup (fewer channels)
+#     lr_channel_names = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1', 'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4']
+    
+#     # High-resolution setup (all channels)
+#     hr_channel_names = all_channels
+    
+#     # Training parameters
+#     batch_size = 4
+#     epochs = 50
+    
+#     # Create data loaders
+#     train_loader, val_loader = get_data_loaders(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         batch_size=batch_size
+#     )
+    
+#     # Get sample data to determine time_steps
+#     sample_item = train_loader.dataset.get_item_at_index(0)
+#     time_steps = sample_item["lo_res_epoch_data"].shape[1]
+    
+#     # Model parameters
+#     d_model = 120
+#     num_heads = 2
+#     mlp_dim = 128
+#     dropout_rate = 0.1
+#     Ls = 2  # Number of spatial layers
+#     Lt = 2  # Number of temporal layers
+    
+#     # Create the model
+#     model, sigma1, sigma2 = create_estformer_model(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         time_steps=time_steps,
+#         d_model=d_model,
+#         num_heads=num_heads,
+#         mlp_dim=mlp_dim,
+#         dropout_rate=dropout_rate,
+#         Ls=Ls,
+#         Lt=Lt
+#     )
+    
+#     # Move model to device
+#     model = model.to(device)
+#     sigma1 = sigma1.to(device)
+#     sigma2 = sigma2.to(device)
+    
+#     # Print model summary
+#     print(model)
+#     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    
+#     # Train the model
+#     history = train_estformer(
+#         model=model,
+#         train_loader=train_loader,
+#         val_loader=val_loader,
+#         sigma1=sigma1,
+#         sigma2=sigma2,
+#         device=device,
+#         lr=1e-4,
+#         epochs=epochs
+#     )
+    
+#     # Monitor sigma values and loss
+#     monitor_sigma_values_and_loss(history)
+    
+#     # Visualize results
+#     visualize_results(model, val_loader.dataset, device)
+    
+#     print("Training completed successfully!")
+
+# if __name__ == "__main__":
+#     main()
+
+# import os
+# import sys
+# import numpy as np
+# import wandb
+# from wandb.integration.keras import WandbCallback, WandbMetricsLogger, WandbModelCheckpoint
+# import tensorflow as tf
+# import GPUtil
+# # import subprocess
+
+# # Force TensorFlow to use the GPU
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
+# os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+# os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+
+# # Check if CUDA is available via GPUtil
+# try:
+#     gpus = GPUtil.getGPUs()
+#     if gpus:
+#         print(f"GPUtil detected {len(gpus)} GPUs:")
+#         for i, gpu in enumerate(gpus):
+#             print(f"  GPU {i}: {gpu.name} (Memory: {gpu.memoryTotal}MB)")
+        
+#         # Try to set GPU as device
+#         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in range(len(gpus))])
+#         print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+#     else:
+#         print("GPUtil found no available GPUs")
+# except Exception as e:
+#     print(f"Error checking GPUs with GPUtil: {e}")
+
+# sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# from models.ESTformer import ESTFormer, reconstruction_loss
+# from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
+# from keras.api.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
+# import matplotlib.pyplot as plt
+
+# def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_model=64, num_heads=4, mlp_dim=128, dropout_rate=0.1, Ls=2, Lt=2, builtin_montage='standard_1020'):
+#     """
+#     Create the ESTformer model with trainable sigma parameters.
+    
+#     Args:
+#         lr_channel_names: List of low-resolution channel names
+#         hr_channel_names: List of high-resolution channel names
+#         time_steps: Number of time steps in each epoch
+#         d_model: Dimension of the model
+#         num_heads: Number of attention heads
+#         mlp_dim: Dimension of MLP layers
+#         dropout_rate: Dropout rate
+#         Ls: Number of spatial layers
+#         Lt: Number of temporal layers
+#         builtin_montage: Name of the montage to use
+        
+#     Returns:
+#         Compiled ESTformer model
+#     """
+#     # Create the model
+#     model = ESTFormer(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         builtin_montage=builtin_montage,
+#         time_steps=time_steps,
+#         d_model=d_model,
+#         num_heads=num_heads,
+#         mlp_dim=mlp_dim,
+#         dropout_rate=dropout_rate,
+#         Ls=Ls,
+#         Lt=Lt
+#     )
+    
+#     # Create trainable sigma parameters for the loss function
+#     sigma1 = tf.Variable(1.0, name="sigma1", trainable=True, dtype=tf.float32)
+#     sigma2 = tf.Variable(1.0, name="sigma2", trainable=True, dtype=tf.float32)
+    
+#     # Custom loss function
+#     def loss_fn(y_true, y_pred):
+#         return reconstruction_loss(y_true, y_pred, sigma1, sigma2)
+    
+#     # Compile the model
+#     model.compile(
+#         optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+#         loss=loss_fn,
+#         metrics=[tf.keras.metrics.MeanAbsoluteError()]
+#     )
+    
+#     return model, sigma1, sigma2
+
+# def get_data_generators(lr_channel_names, hr_channel_names, batch_size=32, test_size=0.2, event_duration=60):
+#     """
+#     Create data generators for training and validation.
+    
+#     Args:
+#         lr_channel_names: List of low-resolution channel names
+#         hr_channel_names: List of high-resolution channel names
+#         batch_size: Batch size
+#         test_size: Fraction of data to use for validation
+#         event_duration: Duration of each event in seconds
+        
+#     Returns:
+#         Training and validation data generators
+#     """
+#     train_gen = HDF5DataSplitGenerator(
+#         dataset_type="train",
+#         test_size=test_size,
+#         event_mode="fixed_length_event",
+#         event_duration=event_duration,
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         batch_size=batch_size
+#     )
+    
+#     val_gen = HDF5DataSplitGenerator(
+#         dataset_type="test",
+#         test_size=test_size,
+#         event_mode="fixed_length_event",
+#         event_duration=event_duration,
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         batch_size=batch_size
+#     )
+    
+#     return train_gen, val_gen
+
+# class SigmaCallback(tf.keras.callbacks.Callback):
+#     """Custom callback to log sigma values to wandb during training."""
+    
+#     def __init__(self, sigma1, sigma2):
+#         super(SigmaCallback, self).__init__()
+#         self.sigma1 = sigma1
+#         self.sigma2 = sigma2
+    
+#     def on_epoch_end(self, epoch, logs=None):
+#         logs = logs or {}
+#         # Log sigma values to wandb
+#         wandb.log({
+#             "sigma1": self.sigma1.numpy(),
+#             "sigma2": self.sigma2.numpy()
+#         }, commit=False)  # Don't commit to allow other metrics to be logged together
+
+# def train_estformer(model, lr_channel_names, hr_channel_names, time_steps, d_model, num_heads, mlp_dim, dropout_rate, Ls, Lt, train_gen, val_gen, sigma1, sigma2, epochs=100, checkpoint_dir='checkpoints'):
+#     """
+#     Train the ESTformer model.
+    
+#     Args:
+#         model: Compiled ESTformer model
+#         train_gen: Training data generator
+#         val_gen: Validation data generator
+#         sigma1: Sigma1 variable for logging
+#         sigma2: Sigma2 variable for logging
+#         epochs: Number of epochs to train for
+#         checkpoint_dir: Directory to save checkpoints
+        
+#     Returns:
+#         Training history
+#     """
+#     # Create checkpoint directory if it doesn't exist
+#     os.makedirs(checkpoint_dir, exist_ok=True)
+    
+#     # Initialize wandb
+#     config = {
+#         "model": "ESTformer",
+#         "lr_channels": len(lr_channel_names),
+#         "hr_channels": len(hr_channel_names),
+#         "time_steps": time_steps,
+#         "d_model": d_model,
+#         "num_heads": num_heads,
+#         "mlp_dim": mlp_dim,
+#         "dropout_rate": dropout_rate,
+#         "Ls": Ls,
+#         "Lt": Lt,
+#         "batch_size": train_gen.batch_size,
+#         "epochs": epochs,
+#         "optimizer": "Adam",
+#         "learning_rate": 1e-4,
+#     }
+    
+#     wandb.init(project="eeg-estformer", config=config)
+    
+#     # Define callbacks
+#     callbacks = [
+#         EarlyStopping(
+#             monitor='val_loss',
+#             patience=15,
+#             restore_best_weights=True,
+#             verbose=1
+#         ),
+#         ModelCheckpoint(
+#             filepath=os.path.join(checkpoint_dir, 'estformer_{epoch:02d}_{val_loss:.4f}.h5'),
+#             monitor='val_loss',
+#             save_best_only=True,
+#             verbose=1
+#         ),
+#         TensorBoard(
+#             log_dir=os.path.join(checkpoint_dir, 'logs'),
+#             histogram_freq=1
+#         ),
+#         WandbCallback(
+#             monitor='val_loss',
+#             save_model=True,
+#             log_weights=True,
+#             log_evaluation=True,
+#             log_batch_frequency=100
+#         ),
+#         SigmaCallback(sigma1, sigma2)
+#     ]
+    
+#     # Custom data generator adapter
+#     def generator_adapter(gen, is_training=True):
+#         while True:
+#             batch = gen[np.random.randint(0, len(gen))] if is_training else next(iter(gen))
+#             yield batch['lo_res_epoch_batch'], batch['hi_res_epoch_batch']
+    
+#     # Train the model
+#     history = model.fit(
+#         generator_adapter(train_gen, is_training=True),
+#         validation_data=generator_adapter(val_gen, is_training=False),
+#         epochs=epochs,
+#         steps_per_epoch=len(train_gen),
+#         validation_steps=len(val_gen),
+#         callbacks=callbacks,
+#         verbose=1
+#     )
+    
+#     # Close wandb run
+#     wandb.finish()
+    
+#     return history
+
+# def visualize_results(model, val_gen, subject_idx=0, channel_idx=0):
+#     """
+#     Visualize the results of the model on a validation sample.
+    
+#     Args:
+#         model: Trained ESTformer model
+#         val_gen: Validation data generator
+#         subject_idx: Index of the subject to visualize
+#         channel_idx: Index of the channel to visualize
+#     """
+#     # Get a validation sample
+#     sample = val_gen.get_item_at_index(subject_idx)
+    
+#     # Get predictions
+#     pred = model.predict(np.expand_dims(sample['lo_res_epoch_data'], axis=0))[0]
+    
+#     # Plot the results
+#     plt.figure(figsize=(12, 8))
+    
+#     # Plot low-res input
+#     plt.subplot(3, 1, 1)
+#     plt.plot(sample['lo_res_epoch_data'][channel_idx])
+#     plt.title(f'Low-Res Input (Channel {channel_idx})')
+    
+#     # Plot high-res ground truth
+#     plt.subplot(3, 1, 2)
+#     plt.plot(sample['hi_res_epoch_data'][channel_idx])
+#     plt.title(f'High-Res Ground Truth (Channel {channel_idx})')
+    
+#     # Plot prediction
+#     plt.subplot(3, 1, 3)
+#     plt.plot(pred[channel_idx])
+#     plt.title(f'Model Prediction (Channel {channel_idx})')
+    
+#     plt.tight_layout()
+    
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"prediction_visualization": wandb.Image(plt)})
+    
+#     plt.show()
+
+# def monitor_sigma_values(sigma1, sigma2, history):
+#     """
+#     Monitor the values of sigma1 and sigma2 during training.
+    
+#     Args:
+#         sigma1: Sigma1 variable
+#         sigma2: Sigma2 variable
+#         history: Training history
+#     """
+#     # Get the values of sigma1 and sigma2
+#     sigma1_values = sigma1.numpy()
+#     sigma2_values = sigma2.numpy()
+    
+#     print(f"Final sigma1 value: {sigma1_values}")
+#     print(f"Final sigma2 value: {sigma2_values}")
+    
+#     # Plot the loss history
+#     plt.figure(figsize=(12, 6))
+#     plt.subplot(1, 2, 1)
+#     plt.plot(history.history['loss'], label='Training Loss')
+#     plt.plot(history.history['val_loss'], label='Validation Loss')
+#     plt.title('Model Loss')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Loss')
+#     plt.legend()
+    
+#     plt.subplot(1, 2, 2)
+#     plt.plot(history.history['mean_absolute_error'], label='Training MAE')
+#     plt.plot(history.history['val_mean_absolute_error'], label='Validation MAE')
+#     plt.title('Model MAE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('MAE')
+#     plt.legend()
+    
+#     plt.tight_layout()
+    
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"training_history": wandb.Image(plt)})
+    
+#     plt.show()
+
+# def main():
+#     # Define parameters
+#     # Set GPU visibility (use all available GPUs)
+#     gpus = tf.config.list_physical_devices('GPU')
+#     if gpus:
+#         try:
+#             for gpu in gpus:
+#                 tf.config.experimental.set_memory_growth(gpu, True)
+#             logical_gpus = tf.config.list_logical_devices('GPU')
+#             print(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
+#         except RuntimeError as e:
+#             print(e)
+    
+#     all_channels = ['Fp1', 'AF7', 'AF3', 'F1', 'F3', 'F5', 'F7', 'FT7', 'FC5', 'FC3', 'FC1', 'C1', 'C3', 'C5', 'T7', 'TP7', 'CP5', 'CP3', 'CP1', 'P1', 'P3', 'P5', 'P7', 'P9', 'PO7', 'PO3', 'O1', 'Iz', 'Oz', 'POz', 'Pz', 'CPz', 'Fpz', 'Fp2', 'AF8', 'AF4', 'AFz', 'Fz', 'F2', 'F4', 'F6', 'F8', 'FT8', 'FC6', 'FC4', 'FC2', 'FCz', 'Cz', 'C2', 'C4', 'C6', 'T8', 'TP8', 'CP6', 'CP4', 'CP2', 'P2', 'P4', 'P6', 'P8', 'P10', 'PO8', 'PO4', 'O2']
+    
+#     # Low-resolution setup (fewer channels)
+#     lr_channel_names = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T7', 'C3', 'Cz', 'C4', 'T8', 'P3', 'Pz', 'P4', 'O1', 'O2']
+    
+#     # High-resolution setup (all channels)
+#     hr_channel_names = all_channels
+    
+#     # Training parameters
+#     batch_size = 4
+#     epochs = 50
+    
+#     # Create data generators
+#     train_gen, val_gen = get_data_generators(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         batch_size=batch_size
+#     )
+
+#     # Model parameters
+#     time_steps = train_gen.get_item_at_index(0)["lo_res_epoch_data"].shape[-1]  # Typically number of samples in each epoch
+#     d_model = 120
+#     num_heads = 4
+#     mlp_dim = 128
+#     dropout_rate = 0.1
+#     Ls = 2  # Number of spatial layers
+#     Lt = 2  # Number of temporal layers
+    
+#     # Create and compile the model
+#     model, sigma1, sigma2 = create_estformer_model(
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         time_steps=time_steps,
+#         d_model=d_model,
+#         num_heads=num_heads,
+#         mlp_dim=mlp_dim,
+#         dropout_rate=dropout_rate,
+#         Ls=Ls,
+#         Lt=Lt
+#     )
+    
+#     # Print model summary
+#     model.summary()
+    
+#     # Train the model
+#     history = train_estformer(
+#         model=model,
+#         lr_channel_names=lr_channel_names,
+#         hr_channel_names=hr_channel_names,
+#         time_steps=time_steps,
+#         d_model=d_model,
+#         num_heads=num_heads,
+#         mlp_dim=mlp_dim,
+#         dropout_rate=dropout_rate,
+#         Ls=Ls,
+#         Lt=Lt,
+#         train_gen=train_gen,
+#         val_gen=val_gen,
+#         sigma1=sigma1,
+#         sigma2=sigma2,
+#         epochs=epochs
+#     )
+    
+#     # Monitor sigma values
+#     monitor_sigma_values(sigma1, sigma2, history)
+    
+#     # Visualize results
+#     visualize_results(model, val_gen)
+    
+#     print("Training completed successfully!")
+
+# if __name__ == "__main__":
+#     main()
