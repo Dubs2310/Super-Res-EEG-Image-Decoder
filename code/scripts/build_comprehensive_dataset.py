@@ -4,16 +4,12 @@ import mne
 import h5py
 import numpy as np
 from math import ceil
-from sklearn.model_selection import train_test_split
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(script_dir, '..', '..', 'data', 'all-joined-1')
 preprocessed_data_dir = os.path.join(data_dir, 'eeg', 'preprocessed')
 preprocessed_files = os.listdir(preprocessed_data_dir)
 dataset_file = "comprehensive_dataset.h5"
-
-test_size = 0.2
-random_states = [97, 42, 56, 35, 68]
 
 if not preprocessed_files:
     raise FileNotFoundError('The preprocessed data directory provided has no preprocessed files.')
@@ -131,88 +127,3 @@ for file in preprocessed_files:
 
                     f['all_evoked_event_epochs'][current_size:new_size] = data
                     f['all_evoked_event_epochs_metadata'][current_size:new_size] = metadata
-
-with h5py.File(os.path.join(data_dir, dataset_file), 'r+') as f:
-
-      for i in range(len(random_states)):
-
-            for config in epoch_config:
-            
-                  if config['mode'] == 'fixed_length_event':
-                  
-                        for dur in config['durations']:
-                              epochs_dataset_name = f'all_{dur}s_epochs'
-                              epochs_shape = f[epochs_dataset_name].shape
-                              metadata_dataset_name = f'all_{dur}s_epochs_metadata'
-                              metadata_shape = f[metadata_dataset_name].shape
-                              indices = np.arange(epochs_shape[0])
-                                          
-                              train_indices, test_indices = train_test_split(indices, test_size=test_size, random_state=random_states[i])
-
-                              train_epochs = f.create_dataset(
-                                    f'train_{i+1}_{dur}s_epochs',
-                                    shape=(len(train_indices), epochs_shape[1], epochs_shape[2]),
-                                    dtype=f[epochs_dataset_name].dtype
-                              )
-                              test_epochs = f.create_dataset(
-                                    f'test_{i+1}_{dur}s_epochs',
-                                    shape=(len(test_indices), epochs_shape[1], epochs_shape[2]),
-                                    dtype=f[epochs_dataset_name].dtype
-                              )
-                              train_metadata = f.create_dataset(
-                                    f'train_{i+1}_{dur}s_epochs_metadata',
-                                    shape=(len(train_indices), metadata_shape[1]),
-                                    dtype=f[metadata_dataset_name].dtype
-                              )
-                              test_metadata = f.create_dataset(
-                                    f'test_{i+1}_{dur}s_epochs_metadata',
-                                    shape=(len(test_indices), metadata_shape[1]),
-                                    dtype=f[metadata_dataset_name].dtype
-                              )
-
-                              for j, k in enumerate(train_indices):
-                                    train_epochs[j] = f[epochs_dataset_name][k]
-                                    train_metadata[j] = f[metadata_dataset_name][k]
-                              
-                              for j, k in enumerate(test_indices):
-                                    test_epochs[j] = f[epochs_dataset_name][k]
-                                    test_metadata[j] = f[metadata_dataset_name][k]
-                  
-                  elif config['mode'] == 'evoked_event':
-
-                              epochs_dataset_name = f'all_evoked_event_epochs'
-                              epochs_shape = f[epochs_dataset_name].shape
-                              metadata_dataset_name = f'all_evoked_event_epochs_metadata'
-                              metadata_shape = f[metadata_dataset_name].shape
-                              indices = np.arange(epochs_shape[0])
-                                          
-                              train_indices, test_indices = train_test_split(indices, test_size=test_size, random_state=random_states[i])
-
-                              train_epochs = f.create_dataset(
-                                    f'train_{i+1}_evoked_event_epochs',
-                                    shape=(len(train_indices), epochs_shape[1], epochs_shape[2]),
-                                    dtype=f[epochs_dataset_name].dtype
-                              )
-                              test_epochs = f.create_dataset(
-                                    f'test_{i+1}_evoked_event_epochs',
-                                    shape=(len(test_indices), epochs_shape[1], epochs_shape[2]),
-                                    dtype=f[epochs_dataset_name].dtype
-                              )
-                              train_metadata = f.create_dataset(
-                                    f'train_{i+1}_evoked_event_epochs_metadata',
-                                    shape=(len(train_indices), metadata_shape[1]),
-                                    dtype=f[metadata_dataset_name].dtype
-                              )
-                              test_metadata = f.create_dataset(
-                                    f'test_{i+1}_evoked_event_epochs_metadata',
-                                    shape=(len(test_indices), metadata_shape[1]),
-                                    dtype=f[metadata_dataset_name].dtype
-                              )
-
-                              for j, k in enumerate(train_indices):
-                                    train_epochs[j] = f[epochs_dataset_name][k]
-                                    train_metadata[j] = f[metadata_dataset_name][k]
-                              
-                              for j, k in enumerate(test_indices):
-                                    test_epochs[j] = f[epochs_dataset_name][k]
-                                    test_metadata[j] = f[metadata_dataset_name][k]
