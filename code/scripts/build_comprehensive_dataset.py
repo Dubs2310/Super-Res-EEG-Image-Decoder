@@ -26,7 +26,7 @@ sfreq = first_raw.info['sfreq']
 ch_names = first_raw.info['ch_names']
 
 epoch_config = [
-    { 'mode': 'fixed_length_event', 'durations': [60, 30, 10]  },
+    { 'mode': 'fixed_length_event', 'durations': [8, 4, 1]  },
     { 'mode': 'evoked_event', 'duration_before': 0.05, 'duration_after': 0.6 },
 ]
 

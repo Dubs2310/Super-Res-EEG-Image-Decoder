@@ -75,7 +75,7 @@ class MaskTokensInsert(nn.Module):
     """
     Module to insert mask tokens at appropriate positions
     """
-    def __init__(self, lr_channel_names, d_model, hr_channel_names, mask_token):
+    def __init__(self, lr_channel_names, hr_channel_names, mask_token):
         """
         Args:
             lr_channel_names: list of low-res EEG channel names
@@ -90,7 +90,6 @@ class MaskTokensInsert(nn.Module):
     
     def forward(self, inp):
         # inp shape: (batch_size, lr_channels, d_model)
-        # batch_size = inp.shape[0]
         out_list = []
         
         for ch in self.hr_channel_names:
@@ -264,11 +263,11 @@ class TRM(nn.Module):
         # Layers
         self.dense1 = nn.Linear(num_channels, d_model)
         self.tsab1 = SAB(num_channels=d_model, time_steps=time_steps, num_heads=num_heads, mlp_dim=mlp_dim, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
-        self.norm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.norm1 = nn.LayerNorm(time_steps, eps=1e-6)
         
         self.dense2 = nn.Linear(d_model, d_model)
         self.tsab2 = SAB(num_channels=d_model, time_steps=time_steps, num_heads=num_heads, mlp_dim=mlp_dim, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
-        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.norm2 = nn.LayerNorm(time_steps, eps=1e-6)
         
         self.dense3 = nn.Linear(d_model, num_channels)
         
@@ -323,6 +322,30 @@ class ESTFormer(nn.Module):
         out = sim_out + trm_out
         out = self.norm(out)
         return out
+    
+
+### UPDATED ESTFORMER WITH CONFIGURABLE HYPERPARAMETERS FOR THE D_MODELS OF SPATIAL AND TEMPORAL ATTENTION BLOCKS ###
+
+# class ESTFormer(nn.Module):
+#     """ESTFormer Model for EEG Super-resolution"""
+#     def __init__(self, lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_model_s, d_model_t, mlp_dim, num_heads, dropout_rate, Ls, Lt):
+#         super().__init__()
+        
+#         # Create mask token as a learnable parameter
+#         self.mask_token = nn.Parameter(torch.zeros((1, 1, d_model_s)))
+        
+#         # Create main modules
+#         self.sim = SIM(lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=self.mask_token,time_steps=time_steps, d_model=d_model_s, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Ls, builtin_montage=builtin_montage)
+#         self.trm = TRM(num_channels=len(hr_channel_names), time_steps=time_steps, d_model=d_model_t, num_heads=num_heads, mlp_dim=mlp_dim, dropout_rate=dropout_rate, L=Lt)
+#         self.norm = nn.LayerNorm([len(hr_channel_names), time_steps], eps=1e-6)
+        
+#     def forward(self, x):
+#         # x shape: (batch_size, lr_channels, time_steps)
+#         sim_out = self.sim(x)
+#         trm_out = self.trm(sim_out)
+#         out = sim_out + trm_out
+#         out = self.norm(out)
+#         return out
 
 def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
     """
@@ -336,9 +359,10 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
     Returns:
         Scalar loss value.
     """
+
     # Convert to complex tensors for FFT
-    fft_true = torch.fft.fft(y_true.to(torch.float32))
-    fft_pred = torch.fft.fft(y_pred.to(torch.float32))
+    fft_true = torch.fft.rfft(y_true.to(torch.float32))
+    fft_pred = torch.fft.rfft(y_pred.to(torch.float32))
     
     # Compute frequency domain MSE
     fmse = torch.mean(torch.abs(fft_true - fft_pred) ** 2)
@@ -352,6 +376,9 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
            torch.log(sigma1 * sigma2)
     
     return loss
+
+
+### TENSORFLOW VERSION ###
 
 # from keras.api.layers import Input, Dense, MultiHeadAttention, Permute, Dropout, LayerNormalization, Layer
 # from keras.api.models import Model, Sequential

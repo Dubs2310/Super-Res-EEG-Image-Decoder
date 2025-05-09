@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
 class HDF5DataSplitGenerator(Dataset):
-    def __init__(self, h5_file_path=None, dataset_type="train", test_size=0.2, random_state=97, event_mode="fixed_length_event", event_duration=60, lr_channel_names=None, hr_channel_names=None, batch_size=32):
+    def __init__(self, h5_file_path=None, dataset_type="train", test_size=0.2, random_state=97, event_mode="fixed_length_event", event_duration=8, lr_channel_names=None, hr_channel_names=None, batch_size=32):
         """
         Initialize the data generator
 
@@ -46,8 +46,8 @@ class HDF5DataSplitGenerator(Dataset):
         if event_mode not in ['fixed_length_event', 'evoked_event']:
             raise ValueError("event_mode must be one of ['fixed_length_event', 'evoked_event']")
         
-        if event_duration not in [60, 30, 10]:
-            raise ValueError("event_duration must be one of [60, 30, 10]")
+        if event_duration not in [8, 4, 1]:
+            raise ValueError("event_duration must be one of [8, 4, 1]")
         
         if dataset_type not in ['train', 'test']:
             raise ValueError("dataset_type must be one of ['train', 'test']")
@@ -96,6 +96,10 @@ class HDF5DataSplitGenerator(Dataset):
     
     def __getitem__(self, batch_idx):
         """Get a batch of data"""
+        # Check if batch_idx is valid
+        if batch_idx >= len(self):
+            raise IndexError(f"Index {batch_idx} out of bounds for {self.dataset_type} dataset with {len(self)} batches")
+
         # Calculate indices for this batch
         start_idx = batch_idx * self.batch_size
         end_idx = min(start_idx + self.batch_size, len(self.indices))
@@ -168,3 +172,26 @@ class HDF5DataSplitGenerator(Dataset):
         return out
 
         # if self.event_mode == 'evoked_event':
+
+    def get_data_shape(self):
+        """Return the shape of the dataset"""
+        with h5py.File(self.h5_file_path, 'r') as f:
+            epoch_shape = f[self.epochs_key].shape[1:]
+            
+        lr_shape = (len(self.lr_indices),) + epoch_shape[1:] if self.lr_indices is not None else epoch_shape
+        hr_shape = (len(self.hr_indices),) + epoch_shape[1:] if self.hr_indices is not None else epoch_shape
+            
+        return {
+            "lo_res_shape": lr_shape,
+            "hi_res_shape": hr_shape
+        }
+    
+    def get_channel_names(self):
+        """Return the channel names used"""
+        lr_names = [self.ch_names[i] for i in self.lr_indices] if self.lr_indices is not None else self.ch_names
+        hr_names = [self.ch_names[i] for i in self.hr_indices] if self.hr_indices is not None else self.ch_names
+        
+        return {
+            "lo_res_channels": lr_names,
+            "hi_res_channels": hr_names
+        }
