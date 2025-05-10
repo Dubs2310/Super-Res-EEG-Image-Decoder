@@ -137,25 +137,11 @@ class COCODataHandler:
         Args:
             index (int): The index of the associated image.
         Returns:
-            turple: A tuple containing the URL, captions and categories of the image.
+            turple: A tuple containing the image embedding and one hot encoding
         """
         index = args[0]
-        values = self._annotations[index]
 
-        coco_id = values['cocoId']
-        coco_split = values['cocoSplit']
-
-        categories = set()
-        captions = set()
-        url = f'http://images.cocodataset.org/{coco_split}/{coco_id.zfill(12)}.jpg'
-
-        for category in values['categories']:
-            categories.add(category['supercategory_name'])
-        
-        for caption in values['captions']:
-            captions.add(caption)
-
-        return url, captions, categories
+        return self.image_embeds[index], self.onehotencode[index]
     
     @classmethod
     def from_file(cls, file_path: str) -> 'COCODataHandler':
