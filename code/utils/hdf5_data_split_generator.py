@@ -284,7 +284,7 @@ class HDF5DataSplitGenerator(Dataset):
                 
                 f.create_dataset(
                     evoked_event_metadata_key, 
-                    shape=(0, 4),  # subject, session, sample_number, evoked_event_id
+                    shape=(0, 4),  # subject, session, sample_number, coco_id
                     maxshape=(None, 4),
                     dtype=np.int32
                 )
@@ -406,17 +406,19 @@ class HDF5DataSplitGenerator(Dataset):
 
         # Return dictionary with all required info
         out = {
-            "actual_index": actual_index,
+            "index_before_random_split": actual_index,
             "sfreq": self.sfreq,  # Use cached sampling frequency
             "mode": self.eeg_epoch_mode,
             "total_duration": self.fixed_length_duration if self.eeg_epoch_mode == 'fixed_length' else self.duration_before_onset + self.duration_after_onset, 
             "subject": subject,
             "session": session,
             "sample_number": sample_number,
-            "evoked_event_id": metadata[3] if self.eeg_epoch_mode == 'around_evoked_event' else None,
             "lo_res": lr_data,
             "hi_res": hr_data,
         }
+
+        if self.eeg_epoch_mode == 'around_evoked_event':
+            out["coco_id"] = metadata[3]
 
         return out
     

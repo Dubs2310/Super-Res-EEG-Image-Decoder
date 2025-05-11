@@ -238,12 +238,12 @@ class EEGNet(nn.Module):
     
     def forward(self, x):
         x = self._feature_forward(x)
-
+        breakpoint()
         x = self.flatten(x)
         clip_embed = self.eeg_to_clip(x)
         logits = self.classifier(clip_embed)
 
-        return clip_embed, logits
+        return logits
     
     def predict(self, x):
         self.eval()
@@ -253,7 +253,7 @@ class EEGNet(nn.Module):
             clip_embed = self.eeg_to_clip(x)
             logits = self.classifier(clip_embed)
             probs = torch.sigmoid(logits)
-        return clip_embed, probs
+        return probs
     
     def fit(self, generator, cocohandler, epochs, device, lr=1e-4, res='lo_res'): 
         """
@@ -262,44 +262,46 @@ class EEGNet(nn.Module):
         self.to(device)
         self.train()
 
-        mse_loss_fn = nn.MSELoss()
+        # mse_loss_fn = nn.MSELoss()
         bce_loss_fn = nn.BCEWithLogitsLoss()
 
         # Parameters for encoder vs classifier
-        enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
+        # enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
         classifier_params = [p for name, p in self.named_parameters() if 'classifier' in name]
 
-        optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
+        # optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
         optimizer_classifier = torch.optim.Adam(classifier_params, lr=lr)
 
         for epoch in range(1, epochs + 1):
-            total_mse = 0.0
+            # total_mse = 0.0
             total_cls_loss = 0.0
 
-            for batch in tqdm(generator, desc=f"Epoch {epoch+1}/{epochs}", leave=True):
+            progress_bar = tqdm(generator, desc=f"Epoch {epoch}/{epochs}", leave=True)
+            for batch in progress_bar:
                 X = batch[res]
                 
-                for i, img_id in enumerate(batch['evoked_event_id']):
+                for i, img_id in enumerate(batch['coco_id']):
                     eeg = X[i]
                     eeg = eeg.unsqueeze(0).to(device)
-                    embeds, y = cocohandler(img_id - 1)
+                    y = cocohandler(img_id - 1)
                     label = y.unsqueeze(0).to(device)
-                    image_embed = embeds.unsqueeze(0).to(device)
+                    # image_embed = embeds.unsqueeze(0).to(device)
 
-                    clip_embed, logits = self(eeg)
+                    logits = self(eeg)
 
                     # Training Encoder
                     for param in classifier_params:
                         param.requires_grad = False
 
-                    optimizer_encoder.zero_grad()
-                    embed_loss = mse_loss_fn(clip_embed, image_embed)
-                    embed_loss.backward()
-                    optimizer_encoder.step()
+                    # optimizer_encoder.zero_grad()
+                    # embed_loss = mse_loss_fn(clip_embed, image_embed)
+                    # embed_loss.backward()
+                    # optimizer_encoder.step()
 
                     # Training Classifier
-                    for param in enc_params:
-                        param.requires_grad = False
+                    # for param in enc_params:
+                        # param.requires_grad = True
+
                     for param in classifier_params:
                         param.requires_grad = True
 
@@ -313,16 +315,15 @@ class EEGNet(nn.Module):
                         params.requires_grad = True
 
                     total_cls_loss += cls_loss.item()
-                    total_mse += embed_loss.item()
+                    # total_mse += embed_loss.item()
             
-            avg_mse = total_mse / len(generator.batch_size)
+            # avg_mse = total_mse / len(generator.batch_size)
             avg_cls_loss = total_cls_loss / len(generator.batch_size)
 
-            print(f'Epoch {epoch}: MSE for Embedding: {avg_mse:.4f} \
-                  | Classification Loss: {avg_cls_loss:.4f}')
+            print(f'Epoch {epoch}: Classification Loss: {avg_cls_loss:.4f}')
 
 if __name__ == '__main__':
-    coco_data = COCODataHandler.from_file('../../data/all-joined-1/coco-train17-captions-and-categories.json')
+    coco_data = COCODataHandler.from_file('S:\\PolySecLabProjects\\eeg-image-decode\\data\\all-joined-1\\coco-train17-captions-and-categories.json')
 
     from torch.utils.data import DataLoader
     
