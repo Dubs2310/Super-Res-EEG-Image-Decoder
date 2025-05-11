@@ -1,6 +1,7 @@
 import os
 import mne
 import argparse
+from scipy import stats
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--raw_data_dir', type=str, help="Where to find the raw files")
@@ -29,6 +30,15 @@ if not files:
 # _evoked_event_epochs = mne.Epochs(cropped, all_events, preload=True, tmin=-0.05, tmax=0.6)
 # _60s_epochs.get_data().shape, _30s_epochs.get_data().shape, _10s_epochs.get_data().shape, _evoked_event_epochs.get_data().shape
 
+def apply_zscore_normalization(raw):
+    """Apply channel-wise z-score normalization to the EEG data"""
+    data = raw.get_data()
+    for i in range(data.shape[0]):  # Loop over channels
+        channel_data = data[i, :]
+        data[i, :] = stats.zscore(channel_data, nan_policy='omit') # Calculate z-score: (x - mean) / std
+    raw._data = data
+    return raw
+
 for file in files:
 
     # don't read any file other than the raw .fif file
@@ -53,7 +63,7 @@ for file in files:
         filtered.set_montage(montage)
         filtered.set_eeg_reference('average')
 
-        filtered.filter(l_freq=0.5, h_freq=125)
+        filtered.filter(l_freq=0.5, h_freq=95)
         filtered.notch_filter(freqs=60)
 
         ica_cleaned = filtered.copy()
@@ -63,11 +73,12 @@ for file in files:
         ica_cleaned = ica.apply(ica_cleaned)
 
         # fig1, fig2, fig3 = raw.plot(show=True), filtered.plot(show=True), ica_cleaned.plot(show=True)
+        normalized = apply_zscore_normalization(ica_cleaned.copy())
 
-        all_events = mne.find_events(ica_cleaned)
-        first_event_time = all_events[0, 0] / ica_cleaned.info['sfreq'] - 0.05  # 50ms before first event
-        last_event_time = all_events[-1, 0] / ica_cleaned.info['sfreq'] + 0.6   # 600ms after last event
-        cropped = ica_cleaned.copy().crop(tmin=first_event_time, tmax=last_event_time)
+        all_events = mne.find_events(normalized)
+        first_event_time = all_events[0, 0] / normalized.info['sfreq'] - 0.05  # 50ms before first event
+        last_event_time = all_events[-1, 0] / normalized.info['sfreq'] + 0.6   # 600ms after last event
+        cropped = normalized.copy().crop(tmin=first_event_time, tmax=last_event_time)
 
         cropped.save(preprocessed_file_path, overwrite=True)
 

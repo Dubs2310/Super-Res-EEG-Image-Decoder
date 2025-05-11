@@ -1,16 +1,13 @@
-#!/usr/bin/env python3
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
 import torch
+from tqdm import tqdm
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.functional import elu
-from torchvision import transforms
-from PIL import Image
-from utils.coco_data_handler import COCODataHandler
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", '..'))
 from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
+from utils.coco_data_handler import COCODataHandler
 
 def _transpose_to_b_1_c_0(x):
     """Transpose input from [batch, channels, time, 1] to [batch, 1, channels, time]."""
@@ -258,7 +255,7 @@ class EEGNet(nn.Module):
             probs = torch.sigmoid(logits)
         return clip_embed, probs
     
-    def fit(self, generator, cocohander, epochs, device, lr=1e-4, res='lo_res'): 
+    def fit(self, generator, cocohandler, epochs, device, lr=1e-4, res='lo_res'): 
         """
             X is zip(metadata, eeg)
         """
@@ -279,13 +276,13 @@ class EEGNet(nn.Module):
             total_mse = 0.0
             total_cls_loss = 0.0
 
-            for batch in generator:
+            for batch in tqdm(generator, desc=f"Epoch {epoch+1}/{epochs}", leave=True):
                 X = batch[res]
                 
                 for i, img_id in enumerate(batch['evoked_event_id']):
                     eeg = X[i]
                     eeg = eeg.unsqueeze(0).to(device)
-                    embeds, y = cocohander(img_id - 1)
+                    embeds, y = cocohandler(img_id - 1)
                     label = y.unsqueeze(0).to(device)
                     image_embed = embeds.unsqueeze(0).to(device)
 
@@ -318,8 +315,8 @@ class EEGNet(nn.Module):
                     total_cls_loss += cls_loss.item()
                     total_mse += embed_loss.item()
             
-            avg_mse = total_mse / num_items
-            avg_cls_loss = total_cls_loss / num_items
+            avg_mse = total_mse / len(generator.batch_size)
+            avg_cls_loss = total_cls_loss / len(generator.batch_size)
 
             print(f'Epoch {epoch}: MSE for Embedding: {avg_mse:.4f} \
                   | Classification Loss: {avg_cls_loss:.4f}')
@@ -331,20 +328,23 @@ if __name__ == '__main__':
     
     train_dataset = HDF5DataSplitGenerator(
         dataset_type="train",
-        test_size=0.2,
-        event_mode="evoked_event"
+        dataset_split="70/25/5",
+        eeg_epoch_mode="around_evoked_event",
+        fixed_length_duration=3,
+        duration_before_onset=0.05,
+        duration_after_onset=0.6
     )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=32,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True
     )
 
     n_classes = len(coco_data.category_index.keys())
-    in_chns, input_window_samples = train_loader.dataset.get_data_shape()['lo_res_shape']
+    in_chns, input_window_samples = train_loader.dataset[0]['lo_res'].shape
 
     eegNet = EEGNet(in_chns, input_window_samples, n_classes)
     eegNet.fit(train_loader, coco_data, 1, 'cuda')

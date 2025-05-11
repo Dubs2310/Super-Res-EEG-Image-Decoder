@@ -9,14 +9,20 @@ from torch.utils.data import DataLoader
 import GPUtil
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from models.estformer.ESTFormer import ESTFormer, reconstruction_loss
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" # Force CUDA to use the GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True" # Enable memory optimization settings for PyTorch
 
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from models.ESTformer import ESTFormer, reconstruction_loss
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", '..'))
 from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
+from utils.metrics import (
+    mae as compute_mean_absolute_error, 
+    nmse as compute_normalized_mean_squared_error, 
+    pcc as compute_pearson_correlation_coefficient,
+    snr as compute_signal_to_noise_ratio
+)
 
 # Check if CUDA is available
 try:
@@ -134,10 +140,6 @@ def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=36, dataset_
     
     return train_loader, val_loader
 
-def compute_mean_absolute_error(y_true, y_pred):
-    """Compute Mean Absolute Error"""
-    return torch.mean(torch.abs(y_true - y_pred))
-
 def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_mode="fixed_length_event", fixed_length_duration=8, lr=5e-5, beta_1=0.9, beta_2=0.95, epochs=30, weight_decay=0.5, checkpoint_dir='checkpoints'):
     """
     Train the ESTformer model.
@@ -202,6 +204,9 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
         sigmas.train()
         train_losses = []
         train_maes = []
+        train_nmse = []
+        train_snr = []
+        train_pcc = []
         
         # Training phase
         # train_dataset = train_loader.dataset
@@ -218,6 +223,9 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
             # Compute loss
             loss = reconstruction_loss(hi_res, outputs, sigmas.sigma1, sigmas.sigma2)
             mae = compute_mean_absolute_error(hi_res, outputs)
+            nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+            snr = compute_signal_to_noise_ratio(hi_res, outputs)
+            pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
 
             # Backward pass and optimization
             loss.backward()
@@ -226,24 +234,34 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
             # Track metrics
             train_losses.append(loss.item())
             train_maes.append(mae.item())
+            train_nmse.append(nmse.item())
+            train_snr.append(snr.item())
+            train_pcc.append(pcc.item())
+
 
             # Update tqdm bar with metrics
             if i % 10 == 0:
-                progress_bar.set_postfix(loss=f"{loss.item():.4f}", mae=f"{mae.item():.4f}")
+                progress_bar.set_postfix(loss=f"{loss.item():.4f}", mae=f"{mae.item():.4f}", nmse=f"{nmse.item():.4f}", snr=f"{snr.item():.4f}", pcc=f"{pcc.item():.4f}")
 
             # Free memory
-            del lo_res, hi_res, outputs, loss, mae
+            del lo_res, hi_res, outputs, loss, mae, nmse, snr, pcc
             torch.cuda.empty_cache()
         
         # Compute epoch metrics
         avg_train_loss = np.mean(train_losses)
         avg_train_mae = np.mean(train_maes)
+        avg_train_nmse = np.mean(train_nmse)
+        avg_train_snr = np.mean(train_snr)
+        avg_train_pcc = np.mean(train_pcc)
         
         # Validation phase
         model.eval()
         sigmas.eval()
         val_losses = []
         val_maes = []
+        val_nmse = []
+        val_snr = []
+        val_pcc = []
         
         with torch.no_grad():
             progress_bar = tqdm(val_loader, desc=f"Passing validation samples", leave=False)
@@ -257,10 +275,16 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
                 # Compute loss
                 loss = reconstruction_loss(hi_res, outputs, sigmas.sigma1, sigmas.sigma2)
                 mae = compute_mean_absolute_error(hi_res, outputs)
+                nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+                snr = compute_signal_to_noise_ratio(hi_res, outputs)
+                pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
                 
                 # Track metrics
                 val_losses.append(loss.item())
                 val_maes.append(mae.item())
+                val_nmse.append(nmse.item())
+                val_snr.append(snr.item())
+                val_pcc.append(pcc.item())
 
                 # Free memory
                 del lo_res, hi_res, outputs, loss, mae
@@ -269,12 +293,21 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
         # Compute epoch metrics
         avg_val_loss = np.mean(val_losses)
         avg_val_mae = np.mean(val_maes)
+        avg_val_nmse = np.mean(val_nmse)
+        avg_val_snr = np.mean(val_snr)
+        avg_val_pcc = np.mean(val_pcc)
         
         # Update history
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         history['train_mae'].append(avg_train_mae)
         history['val_mae'].append(avg_val_mae)
+        history['train_nmse'].append(avg_train_nmse)
+        history['val_nmse'].append(avg_val_nmse)
+        history['train_snr'].append(avg_train_snr)
+        history['val_snr'].append(avg_val_snr)
+        history['train_pcc'].append(avg_train_pcc)
+        history['val_pcc'].append(avg_val_pcc)
         history['sigma1'].append(sigmas.sigma1.item())
         history['sigma2'].append(sigmas.sigma2.item())
         
@@ -285,18 +318,32 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
             "val_loss": avg_val_loss,
             "train_mae": avg_train_mae,
             "val_mae": avg_val_mae,
+            "train_nmse": avg_train_nmse,
+            "val_nmse": avg_val_nmse,
+            "train_snr": avg_train_snr,
+            "val_snr": avg_val_snr,
+            "train_pcc": avg_train_pcc,
+            "val_pcc": avg_val_pcc,
             "sigma1": sigmas.sigma1.item(),
             "sigma2": sigmas.sigma2.item()
         })
         
         # Print epoch summary
-        print(f"Epoch {epoch+1}/{epochs}, "
-              f"train_loss: {avg_train_loss:.4f}, "
-              f"val_loss: {avg_val_loss:.4f}, "
-              f"train_mae: {avg_train_mae:.4f}, "
-              f"val_mae: {avg_val_mae:.4f}, "
-              f"sigma1: {sigmas.sigma1.item():.4f}, "
-              f"sigma2: {sigmas.sigma2.item():.4f}")
+        print(
+            f"Epoch {epoch+1}/{epochs}, "
+            f"train_loss: {avg_train_loss:.4f}, "
+            f"val_loss: {avg_val_loss:.4f}, "
+            f"train_mae: {avg_train_mae:.4f}, "
+            f"val_mae: {avg_val_mae:.4f}, "
+            f"train_nmse: {avg_train_nmse:.4f}, "
+            f"val_nmse: {avg_val_nmse:.4f}, "
+            f"train_snr: {avg_train_snr:.4f}, "
+            f"val_snr: {avg_val_snr:.4f}, "
+            f"train_pcc: {avg_train_pcc:.4f}, "
+            f"val_pcc: {avg_val_pcc:.4f}, "
+            f"sigma1: {sigmas.sigma1.item():.4f}, "
+            f"sigma2: {sigmas.sigma2.item():.4f}"
+        )
         
         # Save best model
         if avg_val_loss < best_val_loss:
@@ -385,61 +432,88 @@ def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_m
     
 #     plt.show()
 
-def monitor_sigma_values_and_loss(history):
-    """
-    Monitor the values of sigma1 and sigma2 during training.
+# def monitor_sigma_values_and_loss(history):
+#     """
+#     Monitor the values of sigma1 and sigma2 during training.
     
-    Args:
-        history: Training history dictionary
-    """
-    # Get the values of sigma1 and sigma2
-    sigma1_values = history['sigma1']
-    sigma2_values = history['sigma2']
+#     Args:
+#         history: Training history dictionary
+#     """
+#     # Get the values of sigma1 and sigma2
+#     sigma1_values = history['sigma1']
+#     sigma2_values = history['sigma2']
     
-    print(f"Final sigma1 value: {sigma1_values[-1]}")
-    print(f"Final sigma2 value: {sigma2_values[-1]}")
+#     print(f"Final sigma1 value: {sigma1_values[-1]}")
+#     print(f"Final sigma2 value: {sigma2_values[-1]}")
     
-    # Plot the loss history
-    plt.figure(figsize=(12, 8))
+#     # Plot the loss history
+#     plt.figure(figsize=(12, 8))
     
-    # Plot loss
-    plt.subplot(2, 2, 1)
-    plt.plot(history['train_loss'], label='Training Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title('Model Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
+#     # Plot loss
+#     plt.subplot(2, 2, 1)
+#     plt.plot(history['train_loss'], label='Training Loss')
+#     plt.plot(history['val_loss'], label='Validation Loss')
+#     plt.title('Model Loss')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Loss')
+#     plt.legend()
     
-    # Plot MAE
-    plt.subplot(2, 2, 2)
-    plt.plot(history['train_mae'], label='Training MAE')
-    plt.plot(history['val_mae'], label='Validation MAE')
-    plt.title('Model MAE')
-    plt.xlabel('Epoch')
-    plt.ylabel('MAE')
-    plt.legend()
+#     # Plot MAE
+#     plt.subplot(2, 2, 2)
+#     plt.plot(history['train_mae'], label='Training MAE')
+#     plt.plot(history['val_mae'], label='Validation MAE')
+#     plt.title('Model MAE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('MAE')
+#     plt.legend()
+
+#     # Plot NMSE
+#     plt.subplot(2, 2, 3)
+#     plt.plot(history['train_nmse'], label='Training NMSE')
+#     plt.plot(history['val_nmse'], label='Validation NMSE')
+#     plt.title('Model NMSE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('NMSE')
+#     plt.legend()
+
+#     # Plot SNR
+#     plt.subplot(2, 2, 4)
+#     plt.plot(history['train_snr'], label='Training SNR')
+#     plt.plot(history['val_snr'], label='Validation SNR')
+#     plt.title('Model SNR')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('SNR')
+#     plt.legend()
     
-    # Plot sigma values
-    plt.subplot(2, 2, 3)
-    plt.plot(sigma1_values, label='Sigma1')
-    plt.title('Sigma1 Value')
-    plt.xlabel('Epoch')
-    plt.ylabel('Value')
+#     # Plot PCC
+#     plt.subplot(2, 2, 5)
+#     plt.plot(history['train_pcc'], label='Training PCC')
+#     plt.plot(history['val_pcc'], label='Validation PCC')
+#     plt.title('Model PCC')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('PCC')
+#     plt.legend()
     
-    plt.subplot(2, 2, 4)
-    plt.plot(sigma2_values, label='Sigma2')
-    plt.title('Sigma2 Value')
-    plt.xlabel('Epoch')
-    plt.ylabel('Value')
+#     # Plot sigma values
+#     plt.subplot(2, 2, 3)
+#     plt.plot(sigma1_values, label='Sigma1')
+#     plt.title('Sigma1 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
     
-    plt.tight_layout()
+#     plt.subplot(2, 2, 4)
+#     plt.plot(sigma2_values, label='Sigma2')
+#     plt.title('Sigma2 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
     
-    # Save figure to wandb
-    if wandb.run is not None:
-        wandb.log({"training_history": wandb.Image(plt)})
+#     plt.tight_layout()
     
-    plt.show()
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"training_history": wandb.Image(plt)})
+    
+#     plt.show()
 
 def main():
     # Check for CUDA availability
@@ -532,7 +606,7 @@ def main():
     )
     
     # Monitor sigma values and loss
-    monitor_sigma_values_and_loss(history)
+    # monitor_sigma_values_and_loss(history)
     
     # Visualize results
     # visualize_results(model, val_loader.dataset, device)
