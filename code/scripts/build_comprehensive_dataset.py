@@ -1,5 +1,4 @@
 import os
-import sys
 import mne
 import h5py
 import numpy as np
@@ -16,9 +15,9 @@ if not preprocessed_files:
 
 if os.path.exists(os.path.join(data_dir, dataset_file)):
     raise FileExistsError('Comprehensive dataset hdf5 file already exists.')
-    
-with h5py.File(os.path.join(data_dir, dataset_file), 'w') as f:
-    pass
+else:
+    with h5py.File(os.path.join(data_dir, dataset_file), 'w') as f:
+        pass
 
 first_raw = mne.io.read_raw_fif(os.path.join(preprocessed_data_dir, preprocessed_files[0]), preload=True)
 first_raw.drop_channels(['Status'])
@@ -26,8 +25,8 @@ sfreq = first_raw.info['sfreq']
 ch_names = first_raw.info['ch_names']
 
 epoch_config = [
-    { 'mode': 'fixed_length_event', 'durations': [8, 4, 1]  },
-    { 'mode': 'evoked_event', 'duration_before': 0.05, 'duration_after': 0.6 },
+    { 'mode': 'fixed_length_event', 'duration': 60 },
+    { 'mode': 'evoked_event', 'duration_before_onset': 0.05, 'duration_after_onset': 0.6 },
 ]
 
 with h5py.File(os.path.join(data_dir, dataset_file), 'r+') as f:
@@ -39,7 +38,7 @@ with h5py.File(os.path.join(data_dir, dataset_file), 'r+') as f:
     for config in epoch_config:
             
         if config['mode'] == 'fixed_length_event':
-            for dur in config['durations']:
+                dur = config['duration']
                 f.create_dataset(
                     f'all_{dur}s_epochs',
                     shape=(0, len(ch_names), int(sfreq * dur)),
@@ -54,16 +53,17 @@ with h5py.File(os.path.join(data_dir, dataset_file), 'r+') as f:
                 )
                     
         elif config['mode'] == 'evoked_event':
-                timesteps = int(ceil(sfreq * (config['duration_before'] + config['duration_after'])))
+                timesteps = int(ceil(sfreq * (config['duration_before_onset'] + config['duration_after_onset'])))
+                dur = config['duration_before_onset'] + config['duration_after_onset']
                 num_channels = len(ch_names)
                 f.create_dataset(
-                    'all_evoked_event_epochs',
+                    f'all_{dur}_evoked_event_epochs',
                     shape=(0, num_channels, timesteps),
                     maxshape=(None, num_channels, timesteps),
                     dtype=np.float32
                 )
                 f.create_dataset(
-                    'all_evoked_event_epochs_metadata', 
+                    f'all_{dur}_evoked_event_epochs_metadata', 
                     shape=(0, 4),  # subject, session, sample_number, evoked_event_id (coco train image)
                     maxshape=(None, 4),
                     dtype=np.int32
@@ -81,7 +81,7 @@ for file in preprocessed_files:
             
             if config['mode'] == 'fixed_length_event':
 
-                for dur in config['durations']:
+                    dur = config['duration']
                     epochs = mne.make_fixed_length_epochs(raw, duration=dur, preload=True)
                     epochs.drop_channels(['Status'])
 
@@ -103,10 +103,10 @@ for file in preprocessed_files:
                     
             if config['mode'] == 'evoked_event':
 
-                    timesteps = int(ceil(sfreq * (config['duration_before'] + config['duration_after'])))
+                    timesteps = int(ceil(sfreq * (config['duration_before_onset'] + config['duration_after_onset'])))
                     
                     evoked_events = mne.find_events(raw)
-                    epochs = mne.Epochs(raw, evoked_events, tmin=-config['duration_before'], tmax=config['duration_after']+0.01, preload=True)
+                    epochs = mne.Epochs(raw, evoked_events, tmin=-config['duration_before_onset'], tmax=config['duration_after_onset']+0.01, preload=True)
                     epochs.drop_channels(['Status'])
 
                     data = epochs.get_data()[:, :, :timesteps] # (batch size, channels, timesteps (forced))
@@ -122,8 +122,8 @@ for file in preprocessed_files:
 
                     current_size = f['all_evoked_event_epochs'].shape[0]
                     new_size = current_size + data.shape[0]
-                    f['all_evoked_event_epochs'].resize(new_size, axis=0)
-                    f['all_evoked_event_epochs_metadata'].resize(new_size, axis=0)
+                    f[f'all_{dur}_evoked_event_epochs'].resize(new_size, axis=0)
+                    f[f'all_{dur}_evoked_event_epochs_metadata'].resize(new_size, axis=0)
 
-                    f['all_evoked_event_epochs'][current_size:new_size] = data
-                    f['all_evoked_event_epochs_metadata'][current_size:new_size] = metadata
+                    f[f'all_{dur}_evoked_event_epochs'][current_size:new_size] = data
+                    f[f'all_{dur}_evoked_event_epochs_metadata'][current_size:new_size] = metadata

@@ -4,7 +4,7 @@ import numpy as np
 import requests
 from PIL import Image
 from typing import Dict, Any
-from transformers import AutoProcessor, TFCLIPModel, logging
+from transformers import AutoProcessor, CLIPModel, logging
 
 logging.set_verbosity_error()
 
@@ -37,7 +37,7 @@ class COCODataHandler:
 
         self._annotations = annotation
 
-        model = TFCLIPModel.from_pretrained('openai/clip-vit-base-patch32')
+        model = CLIPModel.from_pretrained('openai/clip-vit-base-patch32')
         processor = AutoProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
         for data in annotation:
@@ -59,12 +59,12 @@ class COCODataHandler:
             self._urls[coco_id] = url
 
             image = Image.open(requests.get(url, stream=True).raw)
-            inputs = processor(text=list(captions), images=image, return_tensors="tf", padding=True)
+            inputs = processor(text=list(captions), images=image, return_tensors="pt", padding=True)
             outputs = model(**inputs)
 
-            self._image_embeds.append(np.array(outputs.image_embeds).flatten())
+            self._image_embeds.append(np.array(outputs.image_embeds.detach().numpy()).flatten())
         
-        self._image_embeds = np.array(self._image_embeds)
+        self._image_embeds = np.array(self._image_embeds.detach().numpy())
         self._categories_one_hot, self._category_index = self.onehotencode(list(self._categories.values()))
     
     @property

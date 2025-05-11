@@ -3,33 +3,33 @@ import torch.nn as nn
 import numpy as np
 from mne.channels import make_standard_montage, get_builtin_montages
 
-def generate_1d_positional_encoding(time_steps, d_t):
+def generate_1d_positional_encoding(time_steps, d_s):
     """
     Args:
         time_steps: Total sequence length of a given EEG epoch
-        d_t: Dimension length for the sin/cos time encoding, should be an even number
+        d_s: Dimension length for the sin/cos time encoding, should be an even number
     Returns:
-        Tensor with the shape (1, time_steps, d_t)
+        Tensor with the shape (1, time_steps, d_s)
     """
-    assert d_t % 2 == 0, "d_t must be even for sin/cos encoding."
-    pos_encoding = np.zeros((time_steps, d_t))
+    # assert d_s % 2 == 0, "d_s must be even for sin/cos encoding."
+    pos_encoding = np.zeros((time_steps, d_s))
     for pos in range(time_steps):
-        for i in range(d_t // 2):
-            div_term = np.power(10000.0, (2 * i) / d_t)
+        for i in range(d_s // 2):
+            div_term = np.power(10000.0, (2 * i) / d_s)
             pos_encoding[pos, 2 * i] = np.sin(pos / div_term)
             pos_encoding[pos, 2 * i + 1] = np.cos(pos / div_term)
     pos_encoding = np.expand_dims(pos_encoding, axis=0)
     return torch.tensor(pos_encoding, dtype=torch.float32)
 
-def generate_3d_positional_encoding(channel_names, d_s, builtin_montage=None, positions=[]):
+def generate_3d_positional_encoding(channel_names, d_t, builtin_montage=None, positions=[]):
     """
     Args:
         channel_names: List of names of EEG electrodes
-        d_s: Dimension length for the 3D sin/cos channel encoding, should be divisible by 3
+        d_t: Dimension length for the 3D sin/cos channel encoding, should be divisible by 3
         builtin_montage: Name of the montage built into Python-MNE, shouldn't be used if positions is provided
         positions: 3D coordinates of the electrodes placed on the head in the order of channel names, shouldn't be used if builtin_montage is given
     Returns:
-        Tensor with the shape (1, len(channel_names), d_s)
+        Tensor with the shape (1, len(channel_names), d_t)
     """
     num_channels = len(channel_names)
     builtin_montages = get_builtin_montages()
@@ -41,8 +41,8 @@ def generate_3d_positional_encoding(channel_names, d_s, builtin_montage=None, po
         raise ValueError("The number of positions must match the number of channels.")
     if builtin_montage and not positions and builtin_montage not in builtin_montages:
         raise ValueError(f"Montage '{builtin_montage}' is not available. Please choose from {builtin_montages}.")
-    assert d_s % 3 == 0, "d_s must be divisible by 3."
-    ds_per_axis = d_s // 3
+    # assert d_t % 3 == 0, "d_t must be divisible by 3."
+    ds_per_axis = d_t // 3
     if not builtin_montage and positions and len(positions) == num_channels:
         positions = np.array(positions)
     if builtin_montage and not positions and builtin_montage in builtin_montages:
@@ -108,12 +108,12 @@ class MaskTokensInsert(nn.Module):
 
 class SAB(nn.Module):
     """Self Attention Block (Spatial/Temporal)"""
-    def __init__(self, num_channels, time_steps, num_attn_heads, r_mlp, spatial_or_temporal="spatial", dropout_rate=0.5, L_t=1):
+    def __init__(self, num_channels, time_steps, r_mlp, spatial_or_temporal="spatial", dropout_rate=0.5, L_t=1):
         super().__init__()
         self.is_temporal = spatial_or_temporal == "temporal"
         d_embed_in = time_steps if spatial_or_temporal == "spatial" else num_channels
         d_embed_out = d_embed_in * r_mlp
-        # print(d_embed_in, num_attn_heads)
+        num_attn_heads = 1 if self.is_temporal else 3
         
         self.layers = nn.ModuleList()
         for _ in range(L_t):
@@ -159,15 +159,15 @@ class SAB(nn.Module):
 
 class CAB(nn.Module):
     """Cross Attention Block"""
-    def __init__(self, num_channels, time_steps, num_attn_heads, r_mlp, dropout_rate=0.5, L_s=1):
+    def __init__(self, num_channels, time_steps, r_mlp, dropout_rate=0.5, L_s=1):
         super().__init__()
         self.blocks = nn.ModuleList()
         
         for i in range(L_s):
             block = nn.ModuleDict({
-                'tsab1': SAB(num_channels=num_channels, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate),
-                'ssab': SAB(num_channels=num_channels, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="spatial", dropout_rate=dropout_rate),
-                'tsab2': SAB(num_channels=num_channels, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate)
+                'tsab1': SAB(num_channels=num_channels, time_steps=time_steps, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate),
+                'ssab': SAB(num_channels=num_channels, time_steps=time_steps, r_mlp=r_mlp, spatial_or_temporal="spatial", dropout_rate=dropout_rate),
+                'tsab2': SAB(num_channels=num_channels, time_steps=time_steps, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate)
             })
             self.blocks.append(block)
     
@@ -195,38 +195,38 @@ class CAB(nn.Module):
 
 class SIM(nn.Module):
     """Spatial Interpolation Module"""
-    def __init__(self, lr_channel_names, hr_channel_names, mask_token, time_steps, d_s, num_attn_heads, r_mlp, dropout_rate=0.5, builtin_montage=None, positions=[], L_s=1):
+    def __init__(self, lr_channel_names, hr_channel_names, mask_token, time_steps, d_t, r_mlp, dropout_rate=0.5, builtin_montage=None, positions=[], L_s=1):
         super().__init__()
         self.low_res_ch_count = len(lr_channel_names)
         self.high_res_ch_count = len(hr_channel_names)
         
         # Generate positional encodings
         self.register_buffer('low_res_3d_pos_encoding', 
-            generate_3d_positional_encoding(channel_names=lr_channel_names, d_s=d_s, builtin_montage=builtin_montage, positions=positions)
+            generate_3d_positional_encoding(channel_names=lr_channel_names, d_t=d_t, builtin_montage=builtin_montage, positions=positions)
         )
         
         self.register_buffer('high_res_3d_pos_encoding', 
-            generate_3d_positional_encoding(channel_names=hr_channel_names, d_s=d_s, builtin_montage=builtin_montage, positions=positions)
+            generate_3d_positional_encoding(channel_names=hr_channel_names, d_t=d_t, builtin_montage=builtin_montage, positions=positions)
         )
         
         # Layers
-        self.dense1 = nn.Linear(time_steps, d_s)
-        self.norm1 = nn.LayerNorm(d_s, eps=1e-6)
-        self.cab1 = CAB(num_channels=self.low_res_ch_count, time_steps=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s)
+        self.dense1 = nn.Linear(time_steps, d_t)
+        self.norm1 = nn.LayerNorm(d_t, eps=1e-6)
+        self.cab1 = CAB(num_channels=self.low_res_ch_count, time_steps=d_t, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s)
         
         self.mask_token_insert = MaskTokensInsert(lr_channel_names, hr_channel_names, mask_token)
         
-        self.dense2 = nn.Linear(d_s, d_s)
-        self.cab2 = CAB(num_channels=self.high_res_ch_count, time_steps=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s)
-        self.norm2 = nn.LayerNorm(d_s, eps=1e-6)
-        self.dense3 = nn.Linear(d_s, time_steps)
+        self.dense2 = nn.Linear(d_t, d_t)
+        self.cab2 = CAB(num_channels=self.high_res_ch_count, time_steps=d_t, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s)
+        self.norm2 = nn.LayerNorm(d_t, eps=1e-6)
+        self.dense3 = nn.Linear(d_t, time_steps)
         
     def forward(self, x):
         # x shape: (batch_size, low_res_channels, time_steps)
         out = x
         
         # Apply first dense layer
-        out = self.dense1(out)  # (batch_size, low_res_channels, d_s)
+        out = self.dense1(out)  # (batch_size, low_res_channels, d_t)
         
         # Add positional encoding
         out = out + self.low_res_3d_pos_encoding
@@ -236,7 +236,7 @@ class SIM(nn.Module):
         out = self.norm1(out)
         
         # Insert mask tokens
-        out = self.mask_token_insert(out)  # (batch_size, high_res_channels, d_s)
+        out = self.mask_token_insert(out)  # (batch_size, high_res_channels, d_t)
         
         # Apply second dense layer
         out = self.dense2(out)
@@ -255,22 +255,22 @@ class SIM(nn.Module):
 
 class TRM(nn.Module):
     """Temporal Resolution Module"""
-    def __init__(self, num_channels, time_steps, d_t, num_attn_heads, r_mlp, dropout_rate=0.5, L_t=1):
+    def __init__(self, num_channels, time_steps, d_s, r_mlp, dropout_rate=0.5, L_t=1):
         super().__init__()
         
         # Register 1D positional encoding
-        self.register_buffer('_1d_pos_encoding', generate_1d_positional_encoding(time_steps, d_t))
+        self.register_buffer('_1d_pos_encoding', generate_1d_positional_encoding(time_steps, d_s))
         
         # Layers
-        self.dense1 = nn.Linear(num_channels, d_t)
-        self.tsab1 = SAB(num_channels=d_t, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L_t=L_t)
+        self.dense1 = nn.Linear(num_channels, d_s)
+        self.tsab1 = SAB(num_channels=d_s, time_steps=time_steps, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L_t=L_t)
         self.norm1 = nn.LayerNorm(time_steps, eps=1e-6)
         
-        self.dense2 = nn.Linear(d_t, d_t)
-        self.tsab2 = SAB(num_channels=d_t, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L_t=L_t)
+        self.dense2 = nn.Linear(d_s, d_s)
+        self.tsab2 = SAB(num_channels=d_s, time_steps=time_steps, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L_t=L_t)
         self.norm2 = nn.LayerNorm(time_steps, eps=1e-6)
         
-        self.dense3 = nn.Linear(d_t, num_channels)
+        self.dense3 = nn.Linear(d_s, num_channels)
         
     def forward(self, x):
         # x shape: (batch_size, num_channels, time_steps)
@@ -283,21 +283,21 @@ class TRM(nn.Module):
         out = out + self._1d_pos_encoding
         
         # Transpose back for first TSAB
-        out = out.permute(0, 2, 1)  # (batch_size, d_t, time_steps)
+        out = out.permute(0, 2, 1)  # (batch_size, d_s, time_steps)
         out = self.tsab1(out)
         out = self.norm1(out)
         
         # Transpose again for second TSAB
-        out = out.permute(0, 2, 1)  # (batch_size, time_steps, d_t)
+        out = out.permute(0, 2, 1)  # (batch_size, time_steps, d_s)
         out = self.dense2(out)
         out = out + self._1d_pos_encoding
-        out = out.permute(0, 2, 1)  # (batch_size, d_t, time_steps)
+        out = out.permute(0, 2, 1)  # (batch_size, d_s, time_steps)
         
         out = self.tsab2(out)
         out = self.norm2(out)
         
         # Final processing
-        out = out.permute(0, 2, 1)  # (batch_size, time_steps, d_t)
+        out = out.permute(0, 2, 1)  # (batch_size, time_steps, d_s)
         out = self.dense3(out)
         out = out.permute(0, 2, 1)  # (batch_size, num_channels, time_steps)
         
@@ -305,15 +305,18 @@ class TRM(nn.Module):
 
 class ESTFormer(nn.Module):
     """ESTFormer Model for EEG Super-resolution"""
-    def __init__(self, lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_s, d_t, num_attn_heads, r_mlp, dropout_rate, L_s, L_t):
+    def __init__(self, lr_channel_names, hr_channel_names, builtin_montage, time_steps, alpha_t, alpha_s, r_mlp, dropout_rate, L_s, L_t):
         super().__init__()
-        
+        self.alpha_t = alpha_t
+        self.alpha_s = alpha_s
+        d_t = roundUpToNearestMultipleOfN(alpha_t * time_steps, 3)
+        d_s = roundUpToNearestMultipleOfN(alpha_s * len(hr_channel_names), 2)
         # Create mask token as a learnable parameter
-        self.mask_token = nn.Parameter(torch.zeros((1, 1, d_s)))
+        self.mask_token = nn.Parameter(torch.zeros((1, 1, d_t)))
         
         # Create main modules
-        self.sim = SIM(lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=self.mask_token,time_steps=time_steps, d_s=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s, builtin_montage=builtin_montage)
-        self.trm = TRM(num_channels=len(hr_channel_names), time_steps=time_steps, d_t=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_t=L_t)
+        self.sim = SIM(lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=self.mask_token, time_steps=time_steps, d_t=d_t, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s, builtin_montage=builtin_montage)
+        self.trm = TRM(num_channels=len(hr_channel_names), time_steps=time_steps, d_s=d_s, r_mlp=r_mlp, dropout_rate=dropout_rate, L_t=L_t)
         self.norm = nn.LayerNorm([len(hr_channel_names), time_steps], eps=1e-6)
         
     def forward(self, x):
@@ -323,30 +326,9 @@ class ESTFormer(nn.Module):
         out = sim_out + trm_out
         out = self.norm(out)
         return out
-    
 
-### UPDATED ESTFORMER WITH CONFIGURABLE HYPERPARAMETERS FOR THE D_MODELS OF SPATIAL AND TEMPORAL ATTENTION BLOCKS ###
-
-# class ESTFormer(nn.Module):
-#     """ESTFormer Model for EEG Super-resolution"""
-#     def __init__(self, lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_s, d_t, r_mlp, num_attn_heads, dropout_rate, L_s, L_t):
-#         super().__init__()
-        
-#         # Create mask token as a learnable parameter
-#         self.mask_token = nn.Parameter(torch.zeros((1, 1, d_s)))
-        
-#         # Create main modules
-#         self.sim = SIM(lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=self.mask_token,time_steps=time_steps, d_s=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_s=L_s, builtin_montage=builtin_montage)
-#         self.trm = TRM(num_channels=len(hr_channel_names), time_steps=time_steps, d_t=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L_t=L_t)
-#         self.norm = nn.LayerNorm([len(hr_channel_names), time_steps], eps=1e-6)
-        
-#     def forward(self, x):
-#         # x shape: (batch_size, lr_channels, time_steps)
-#         sim_out = self.sim(x)
-#         trm_out = self.trm(sim_out)
-#         out = sim_out + trm_out
-#         out = self.norm(out)
-#         return out
+def roundUpToNearestMultipleOfN(x, n):
+    return int(x + (n - x % n) if x % n != 0 else x)
 
 def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
     """
@@ -392,33 +374,33 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 # import tensorflow as tf
 # import numpy as np
 
-# def generate_1d_positional_encoding(time_steps, d_t):
+# def generate_1d_positional_encoding(time_steps, d_s):
 #     """
 #     Args:
 #         time_steps: Total sequence length of a given EEG epoch
-#         d_t: Dimension length for the sin/cos time encoding, should be an even number
+#         d_s: Dimension length for the sin/cos time encoding, should be an even number
 #     Returns:
-#         Tensor with the shape (1, time_steps, d_t)
+#         Tensor with the shape (1, time_steps, d_s)
 #     """
-#     assert d_t % 2 == 0, "d_t must be even for sin/cos encoding."
-#     pos_encoding = np.zeros((time_steps, d_t))
+#     assert d_s % 2 == 0, "d_s must be even for sin/cos encoding."
+#     pos_encoding = np.zeros((time_steps, d_s))
 #     for pos in range(time_steps):
-#         for i in range(d_t // 2):
-#             div_term = np.power(10000.0, (2 * i) / d_t)
+#         for i in range(d_s // 2):
+#             div_term = np.power(10000.0, (2 * i) / d_s)
 #             pos_encoding[pos, 2 * i] = np.sin(pos / div_term)
 #             pos_encoding[pos, 2 * i + 1] = np.cos(pos / div_term)
 #     pos_encoding = np.expand_dims(pos_encoding, axis=0)
 #     return tf.constant(pos_encoding, dtype=tf.float32)
 
-# def generate_3d_positional_encoding(channel_names, d_s, builtin_montage=None, positions=[]):
+# def generate_3d_positional_encoding(channel_names, d_t, builtin_montage=None, positions=[]):
 #     """
 #     Args:
 #         channel_names: List of names of EEG electrodes
-#         d_s: Dimension length for the 3D sin/cos channel encoding, should be divisible by 3
+#         d_t: Dimension length for the 3D sin/cos channel encoding, should be divisible by 3
 #         builtin_montage: Name of the montage built into Python-MNE, shouldn't be used if positions is provided
 #         positions: 3D coordinates of the electrodes placed on the head in the order of channel names, shouldn't be used if builtin_montage is given
 #     Returns:
-#         Tensor with the shape (1, len(channel_names), d_s)
+#         Tensor with the shape (1, len(channel_names), d_t)
 #     """
 #     num_channels = len(channel_names)
 #     builtin_montages = get_builtin_montages()
@@ -430,8 +412,8 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 #         raise ValueError("The number of positions must match the number of channels.")
 #     if builtin_montage and not positions and builtin_montage not in builtin_montages:
 #         raise ValueError(f"Montage '{builtin_montage}' is not available. Please choose from {builtin_montages}.")
-#     assert d_s % 3 == 0, "d_s must be divisible by 3."
-#     ds_per_axis = d_s // 3
+#     assert d_t % 3 == 0, "d_t must be divisible by 3."
+#     ds_per_axis = d_t // 3
 #     if not builtin_montage and positions and len(positions) == num_channels:
 #         positions = np.array(positions)
 #     if builtin_montage and not positions and builtin_montage in builtin_montages:
@@ -466,11 +448,11 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 #         lr_tensor: KerasTensor of shape (batch_size, lr_channels, time_steps)
 #         lr_channel_names: list of low-res EEG channel names
 #         hr_channel_names: list of target high-res EEG channel names
-#         mask_token: Tensor of shape (1, 1, d_s), will be broadcast across batch
+#         mask_token: Tensor of shape (1, 1, d_t), will be broadcast across batch
 #     Returns:
 #         KerasTensor of shape (batch_size, hr_channels, time_steps)
 #     """
-#     inp = Input((len(lr_channel_names), d_s))
+#     inp = Input((len(lr_channel_names), d_t))
 #     lr_dict = {ch: i for i, ch in enumerate(lr_channel_names)}
 #     out_list = []
 #     mask_expander = MaskTokenExpander(mask_token)
@@ -553,25 +535,25 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 #     return Model(inputs=inp, outputs=out, name=name)
 
 # # Spatial Interpolation Module
-# def SIM(lr_channel_names, hr_channel_names, mask_token, time_steps, d_s, num_attn_heads, r_mlp, name, dropout_rate=0.5, builtin_montage=None, positions=[], L=1):
+# def SIM(lr_channel_names, hr_channel_names, mask_token, time_steps, d_t, num_attn_heads, r_mlp, name, dropout_rate=0.5, builtin_montage=None, positions=[], L=1):
 #     low_res_ch_count = len(lr_channel_names)
 #     high_res_ch_count = len(hr_channel_names)
-#     low_res_3d_pos_encoding  = generate_3d_positional_encoding(channel_names=lr_channel_names,  d_s=d_s, builtin_montage=builtin_montage, positions=positions)
-#     high_res_3d_pos_encoding = generate_3d_positional_encoding(channel_names=hr_channel_names, d_s=d_s, builtin_montage=builtin_montage, positions=positions)
+#     low_res_3d_pos_encoding  = generate_3d_positional_encoding(channel_names=lr_channel_names,  d_t=d_t, builtin_montage=builtin_montage, positions=positions)
+#     high_res_3d_pos_encoding = generate_3d_positional_encoding(channel_names=hr_channel_names, d_t=d_t, builtin_montage=builtin_montage, positions=positions)
 #     norm1 = LayerNormalization(epsilon=1e-6)
 #     norm2 = LayerNormalization(epsilon=1e-6)
-#     dense1 = Dense(d_s, activation='gelu')
-#     dense2 = Dense(d_s, activation='gelu')
+#     dense1 = Dense(d_t, activation='gelu')
+#     dense2 = Dense(d_t, activation='gelu')
 #     dense3 = Dense(time_steps, activation='gelu')
-#     cab1 = CAB(name="SIM_CAB1", num_channels=low_res_ch_count,  time_steps=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L)
-#     cab2 = CAB(name="SIM_CAB2", num_channels=high_res_ch_count, time_steps=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L)
+#     cab1 = CAB(name="SIM_CAB1", num_channels=low_res_ch_count,  time_steps=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L)
+#     cab2 = CAB(name="SIM_CAB2", num_channels=high_res_ch_count, time_steps=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L)
 #     inp = Input(shape=(len(lr_channel_names), time_steps))
 #     out = inp
 #     out = dense1(out)
 #     out = out + low_res_3d_pos_encoding
 #     out = cab1(out)
 #     out = norm1(out)
-#     out = MaskTokensInsert(lr_channel_names, d_s, hr_channel_names, mask_token)(out) # Concatenate(axis=1)([out, mask_token])
+#     out = MaskTokensInsert(lr_channel_names, d_t, hr_channel_names, mask_token)(out) # Concatenate(axis=1)([out, mask_token])
 #     out = dense2(out)
 #     out = out + high_res_3d_pos_encoding
 #     out = cab2(out)
@@ -580,15 +562,15 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 #     return Model(inputs=inp, outputs=out, name=name)
 
 # # Temporal Resolution Module
-# def TRM(num_channels, time_steps, d_t, num_attn_heads, r_mlp, name, dropout_rate=0.5, L=1):
+# def TRM(num_channels, time_steps, d_s, num_attn_heads, r_mlp, name, dropout_rate=0.5, L=1):
 #     norm1 = LayerNormalization(epsilon=1e-6)
 #     norm2 = LayerNormalization(epsilon=1e-6)
-#     dense1 = Dense(d_t, activation='gelu')
-#     dense2 = Dense(d_t, activation='gelu')
+#     dense1 = Dense(d_s, activation='gelu')
+#     dense2 = Dense(d_s, activation='gelu')
 #     dense3 = Dense(num_channels, activation='gelu')
-#     _1d_pos_encoding = generate_1d_positional_encoding(time_steps, d_t)
-#     tsab1 = SAB(name="TRM_TSAB1", num_channels=d_t, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
-#     tsab2 = SAB(name="TRM_TSAB2", num_channels=d_t, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
+#     _1d_pos_encoding = generate_1d_positional_encoding(time_steps, d_s)
+#     tsab1 = SAB(name="TRM_TSAB1", num_channels=d_s, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
+#     tsab2 = SAB(name="TRM_TSAB2", num_channels=d_s, time_steps=time_steps, num_attn_heads=num_attn_heads, r_mlp=r_mlp, spatial_or_temporal="temporal", dropout_rate=dropout_rate, L=L)
 #     inp = Input(shape=(num_channels, time_steps))
 #     out = inp
 #     out = Permute((2, 1))(inp)
@@ -609,11 +591,11 @@ def reconstruction_loss(y_true, y_pred, sigma1, sigma2):
 #     return Model(inputs=inp, outputs=out, name=name)
 
 # # ESTFormer Model
-# def ESTFormer(lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_s, num_attn_heads, r_mlp, dropout_rate, L_s, L_t):
+# def ESTFormer(lr_channel_names, hr_channel_names, builtin_montage, time_steps, d_t, num_attn_heads, r_mlp, dropout_rate, L_s, L_t):
 #     inp = Input(shape=(len(lr_channel_names), time_steps))
-#     mask_token = tf.Variable(initial_value=tf.zeros((1, 1, d_s)), trainable=True, name="mask_token")
-#     sim = SIM(name="ESTFormer_SIM", time_steps=time_steps, d_s=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L_s, builtin_montage=builtin_montage, lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=mask_token)(inp)
-#     trm = TRM(name="ESTFormer_TRM", time_steps=time_steps, d_t=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L_t, num_channels=len(hr_channel_names))(sim)
+#     mask_token = tf.Variable(initial_value=tf.zeros((1, 1, d_t)), trainable=True, name="mask_token")
+#     sim = SIM(name="ESTFormer_SIM", time_steps=time_steps, d_t=d_t, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L_s, builtin_montage=builtin_montage, lr_channel_names=lr_channel_names, hr_channel_names=hr_channel_names, mask_token=mask_token)(inp)
+#     trm = TRM(name="ESTFormer_TRM", time_steps=time_steps, d_s=d_s, num_attn_heads=num_attn_heads, r_mlp=r_mlp, dropout_rate=dropout_rate, L=L_t, num_channels=len(hr_channel_names))(sim)
 #     out = sim + trm
 #     out = LayerNormalization(epsilon=1e-6)(out)
 #     return Model(name="ESTFormer", inputs=inp, outputs=out)

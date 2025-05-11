@@ -258,7 +258,7 @@ class EEGNet(nn.Module):
             probs = torch.sigmoid(logits)
         return clip_embed, probs
     
-    def fit(self, generator, cocohander, epochs, device, lr=1e-4, res='lo_res_epoch_batch'): 
+    def fit(self, generator, cocohander, epochs, device, lr=1e-4, res='lo_res'): 
         """
             X is zip(metadata, eeg)
         """
@@ -275,24 +275,17 @@ class EEGNet(nn.Module):
         optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
         optimizer_classifier = torch.optim.Adam(classifier_params, lr=lr)
 
-        num_batches = len(generator.dataset)
-
         for epoch in range(1, epochs + 1):
             total_mse = 0.0
             total_cls_loss = 0.0
 
-            for j in range(num_batches):
-                batch = generator.dataset[j]
+            for batch in generator:
                 X = batch[res]
-                batch_metadata = batch['epoch_batch_metadata']
-
-                num_items = X.shape[0] # number of items per batch
-
-                for i in range(num_items):
-                    metadata = batch_metadata[i]
+                
+                for i, img_id in enumerate(batch['evoked_event_id']):
                     eeg = X[i]
                     eeg = eeg.unsqueeze(0).to(device)
-                    embeds, y = cocohander(metadata[-1]-1)
+                    embeds, y = cocohander(img_id - 1)
                     label = y.unsqueeze(0).to(device)
                     image_embed = embeds.unsqueeze(0).to(device)
 

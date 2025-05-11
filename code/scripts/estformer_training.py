@@ -41,7 +41,7 @@ class SigmaParameters(nn.Module):
         self.sigma1 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
         self.sigma2 = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
 
-def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_s=64, d_t=64, num_attn_heads=8, r_mlp=128, dropout_rate=0.5, L_s=1, L_t=1, builtin_montage='standard_1020'):
+def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, alpha_s=0.75, alpha_t=0.60, r_mlp=128, dropout_rate=0.5, L_s=1, L_t=1, builtin_montage='standard_1020'):
     """
     Create the ESTformer model with trainable sigma parameters.
     
@@ -49,8 +49,7 @@ def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_s=6
         lr_channel_names: List of low-resolution channel names
         hr_channel_names: List of high-resolution channel names
         time_steps: Number of time steps in each epoch
-        d_s: Dimension of the model
-        num_attn_heads: Number of attention heads
+        alpha_s: Dimension of the model
         r_mlp: Dimension of MLP layers
         dropout_rate: Dropout rate
         L_s: Number of spatial layers
@@ -66,9 +65,8 @@ def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_s=6
         hr_channel_names=hr_channel_names,
         builtin_montage=builtin_montage,
         time_steps=time_steps,
-        d_s=d_s,
-        d_t=d_t,
-        num_attn_heads=num_attn_heads,
+        alpha_s=alpha_s,
+        alpha_t=alpha_t,
         r_mlp=r_mlp,
         dropout_rate=dropout_rate,
         L_s=L_s,
@@ -80,7 +78,7 @@ def create_estformer_model(lr_channel_names, hr_channel_names, time_steps, d_s=6
     
     return model, sigmas
 
-def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=36, test_size=0.2, event_mode="fixed_length_event", event_duration=8):
+def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=36, dataset_split="70/25/5", random_state=97, eeg_epoch_mode="fixed_length_event", fixed_length_duration=6, duration_before_onset=0.05, duration_after_onset=0.6):
     """
     Create data loaders for training and validation.
     
@@ -88,26 +86,32 @@ def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=36, test_siz
         lr_channel_names: List of low-resolution channel names
         hr_channel_names: List of high-resolution channel names
         batch_size: Batch size
-        test_size: Fraction of data to use for validation
-        event_duration: Duration of each event in seconds
+        dataset_split: Fraction of data to use for validation
+        fixed_length_duration: Duration of each event in seconds
         
     Returns:
         Training and validation data loaders
     """
     train_dataset = HDF5DataSplitGenerator(
         dataset_type="train",
-        test_size=test_size,
-        event_mode=event_mode,
-        event_duration=event_duration,
+        dataset_split=dataset_split,
+        eeg_epoch_mode=eeg_epoch_mode,
+        random_state=random_state,
+        fixed_length_duration=fixed_length_duration,
+        duration_before_onset=duration_before_onset,
+        duration_after_onset=duration_after_onset,
         lr_channel_names=lr_channel_names,
         hr_channel_names=hr_channel_names
     )
     
-    test_dataset = HDF5DataSplitGenerator(
-        dataset_type="test",
-        test_size=test_size,
-        event_mode=event_mode,
-        event_duration=event_duration,
+    val_dataset = HDF5DataSplitGenerator(
+        dataset_type="val",
+        dataset_split=dataset_split,
+        eeg_epoch_mode=eeg_epoch_mode,
+        random_state=random_state,
+        fixed_length_duration=fixed_length_duration,
+        duration_before_onset=duration_before_onset,
+        duration_after_onset=duration_after_onset,
         lr_channel_names=lr_channel_names,
         hr_channel_names=hr_channel_names
     )
@@ -115,33 +119,33 @@ def get_data_loaders(lr_channel_names, hr_channel_names, batch_size=36, test_siz
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True
     )
     
-    test_loader = DataLoader(
-        test_dataset,
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=4,
         pin_memory=True
     )
     
-    return train_loader, test_loader
+    return train_loader, val_loader
 
 def compute_mean_absolute_error(y_true, y_pred):
     """Compute Mean Absolute Error"""
     return torch.mean(torch.abs(y_true - y_pred))
 
-def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode="fixed_length_event", event_duration=8, lr=5e-5, beta_1=0.9, beta_2=0.95, epochs=30, weight_decay=0.5, checkpoint_dir='checkpoints'):
+def train_estformer(model, train_loader, val_loader, sigmas, device, eeg_epoch_mode="fixed_length_event", fixed_length_duration=8, lr=5e-5, beta_1=0.9, beta_2=0.95, epochs=30, weight_decay=0.5, checkpoint_dir='checkpoints'):
     """
     Train the ESTformer model.
     
     Args:
         model: ESTformer model
         train_loader: Training data loader
-        test_loader: Validation data loader
+        val_loader: Validation data loader
         sigmas: SigmaParameters module
         device: Device to train on (cuda/cpu)
         lr: Learning rate
@@ -157,13 +161,12 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
     # Initialize wandb
     config = {
         "model": "ESTformer",
-        "event_mode": event_mode,
-        "event_duration": event_duration,
+        "eeg_epoch_mode": eeg_epoch_mode,
+        "fixed_length_duration": fixed_length_duration,
         "lr_channels": len(train_loader.dataset.lr_indices) if train_loader.dataset.lr_indices is not None else len(train_loader.dataset.ch_names),
         "hr_channels": len(train_loader.dataset.hr_indices) if train_loader.dataset.hr_indices is not None else len(train_loader.dataset.ch_names),
-        "d_s": model.sim.dense1.out_features,
-        "d_t": model.trm.dense1.out_features,
-        "num_attn_heads": model.sim.cab1.blocks[0]['tsab1'].layers[0]['attn'].num_heads,
+        "alpha_s": model.alpha_s,
+        "alpha_t": model.alpha_t,
         "r_mlp": model.sim.cab1.blocks[0]['tsab1'].layers[0]['mlp'][0].out_features,
         "dropout_rate": model.sim.cab1.blocks[0]['tsab1'].layers[0]['dropout1'].p,
         "L_s": len(model.sim.cab1.blocks),
@@ -183,12 +186,12 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
     ], lr=lr, weight_decay=weight_decay, betas=(beta_1, beta_2))
     
     # Initialize tracking variables
-    best_test_loss = float('inf')
+    best_val_loss = float('inf')
     history = {
         'train_loss': [],
-        'test_loss': [],
+        'val_loss': [],
         'train_mae': [],
-        'test_mae': [],
+        'val_mae': [],
         'sigma1': [],
         'sigma2': []
     }
@@ -201,12 +204,12 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
         train_maes = []
         
         # Training phase
-        train_dataset = train_loader.dataset
-        progress_bar = tqdm(range(len(train_dataset)), desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        # train_dataset = train_loader.dataset
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=True)
 
-        for i in progress_bar:
-            lo_res = torch.from_numpy(train_dataset[i]['lo_res_epoch_batch']).float().to(device)
-            hi_res = torch.from_numpy(train_dataset[i]['hi_res_epoch_batch']).float().to(device)
+        for i, batch in enumerate(progress_bar):
+            lo_res = batch['lo_res'].float().to(device)
+            hi_res = batch['hi_res'].float().to(device)
 
             # Forward pass
             optimizer.zero_grad()
@@ -239,13 +242,14 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
         # Validation phase
         model.eval()
         sigmas.eval()
-        test_losses = []
-        test_maes = []
+        val_losses = []
+        val_maes = []
         
         with torch.no_grad():
-            for i in range(len(test_loader.dataset)):
-                lo_res = torch.from_numpy(test_loader.dataset[i]['lo_res_epoch_batch']).float().to(device)
-                hi_res = torch.from_numpy(test_loader.dataset[i]['hi_res_epoch_batch']).float().to(device)
+            progress_bar = tqdm(val_loader, desc=f"Passing validation samples", leave=False)
+            for batch in val_loader:
+                lo_res = batch['lo_res'].float().to(device)
+                hi_res = batch['hi_res'].float().to(device)
                 
                 # Forward pass
                 outputs = model(lo_res)
@@ -255,22 +259,22 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
                 mae = compute_mean_absolute_error(hi_res, outputs)
                 
                 # Track metrics
-                test_losses.append(loss.item())
-                test_maes.append(mae.item())
+                val_losses.append(loss.item())
+                val_maes.append(mae.item())
 
                 # Free memory
                 del lo_res, hi_res, outputs, loss, mae
                 torch.cuda.empty_cache()
         
         # Compute epoch metrics
-        avg_test_loss = np.mean(test_losses)
-        avg_test_mae = np.mean(test_maes)
+        avg_val_loss = np.mean(val_losses)
+        avg_val_mae = np.mean(val_maes)
         
         # Update history
         history['train_loss'].append(avg_train_loss)
-        history['test_loss'].append(avg_test_loss)
+        history['val_loss'].append(avg_val_loss)
         history['train_mae'].append(avg_train_mae)
-        history['test_mae'].append(avg_test_mae)
+        history['val_mae'].append(avg_val_mae)
         history['sigma1'].append(sigmas.sigma1.item())
         history['sigma2'].append(sigmas.sigma2.item())
         
@@ -278,32 +282,32 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
-            "test_loss": avg_test_loss,
+            "val_loss": avg_val_loss,
             "train_mae": avg_train_mae,
-            "test_mae": avg_test_mae,
+            "val_mae": avg_val_mae,
             "sigma1": sigmas.sigma1.item(),
             "sigma2": sigmas.sigma2.item()
         })
         
         # Print epoch summary
         print(f"Epoch {epoch+1}/{epochs}, "
-              f"Train Loss: {avg_train_loss:.4f}, "
-              f"Val Loss: {avg_test_loss:.4f}, "
-              f"Train MAE: {avg_train_mae:.4f}, "
-              f"Val MAE: {avg_test_mae:.4f}, "
-              f"Sigma1: {sigmas.sigma1.item():.4f}, "
-              f"Sigma2: {sigmas.sigma2.item():.4f}")
+              f"train_loss: {avg_train_loss:.4f}, "
+              f"val_loss: {avg_val_loss:.4f}, "
+              f"train_mae: {avg_train_mae:.4f}, "
+              f"val_mae: {avg_val_mae:.4f}, "
+              f"sigma1: {sigmas.sigma1.item():.4f}, "
+              f"sigma2: {sigmas.sigma2.item():.4f}")
         
         # Save best model
-        if avg_test_loss < best_test_loss:
-            best_test_loss = avg_test_loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             checkpoint_path = os.path.join(checkpoint_dir, f'estformer_best.pt')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'sigmas_state_dict': sigmas.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'test_loss': avg_test_loss,
+                'val_loss': avg_val_loss,
             }, checkpoint_path)
             
             print(f"Saved best model checkpoint to {checkpoint_path}")
@@ -318,7 +322,7 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
                 'model_state_dict': model.state_dict(),
                 'sigmas_state_dict': sigmas.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'test_loss': avg_test_loss,
+                'val_loss': avg_val_loss,
             }, checkpoint_path)
     
     # Close wandb run
@@ -326,60 +330,60 @@ def train_estformer(model, train_loader, test_loader, sigmas, device, event_mode
     
     return history
 
-def visualize_results(model, test_dataset, device, subject_idx=0, channel_idx=0):
-    """
-    Visualize the results of the model on a validation sample.
+# def visualize_results(model, val_dataset, device, subject_idx=0, channel_idx=0):
+#     """
+#     Visualize the results of the model on a validation sample.
     
-    Args:
-        model: Trained ESTformer model
-        test_dataset: Validation dataset
-        device: Device to run inference on
-        subject_idx: Index of the subject to visualize
-        channel_idx: Index of the channel to visualize
-    """
-    # Set model to eval mode
-    model.eval()
+#     Args:
+#         model: Trained ESTformer model
+#         val_dataset: Validation dataset
+#         device: Device to run inference on
+#         subject_idx: Index of the subject to visualize
+#         channel_idx: Index of the channel to visualize
+#     """
+#     # Set model to eval mode
+#     model.eval()
     
-    # Get a validation sample
-    sample = test_dataset.get_item_at_index(subject_idx)
+#     # Get a validation sample
+#     sample = val_dataset[subject_idx]
     
-    # Convert to tensors and add batch dimension
-    lo_res = torch.tensor(sample['lo_res_epoch_data'], dtype=torch.float32).unsqueeze(0).to(device)
-    hi_res = torch.tensor(sample['hi_res_epoch_data'], dtype=torch.float32)
+#     # Convert to tensors and add batch dimension
+#     lo_res = torch.tensor(sample['lo_res'], dtype=torch.float32).unsqueeze(0).to(device)
+#     hi_res = torch.tensor(sample['hi_res'], dtype=torch.float32)
     
-    # Get predictions
-    with torch.no_grad():
-        pred = model(lo_res).cpu().numpy()[0]
+#     # Get predictions
+#     with torch.no_grad():
+#         pred = model(lo_res).cpu().numpy()[0]
     
-    # Convert back to numpy for visualization
-    lo_res = lo_res.cpu().numpy()[0]
-    hi_res = hi_res.numpy()
+#     # Convert back to numpy for visualization
+#     lo_res = lo_res.cpu().numpy()[0]
+#     hi_res = hi_res.numpy()
     
-    # Plot the results
-    plt.figure(figsize=(12, 8))
+#     # Plot the results
+#     plt.figure(figsize=(12, 8))
     
-    # Plot low-res input
-    plt.subplot(3, 1, 1)
-    plt.plot(lo_res[channel_idx])
-    plt.title(f'Low-Res Input (Channel {channel_idx})')
+#     # Plot low-res input
+#     plt.subplot(3, 1, 1)
+#     plt.plot(lo_res[channel_idx])
+#     plt.title(f'Low-Res Input (Channel {channel_idx})')
     
-    # Plot high-res ground truth
-    plt.subplot(3, 1, 2)
-    plt.plot(hi_res[channel_idx])
-    plt.title(f'High-Res Ground Truth (Channel {channel_idx})')
+#     # Plot high-res ground truth
+#     plt.subplot(3, 1, 2)
+#     plt.plot(hi_res[channel_idx])
+#     plt.title(f'High-Res Ground Truth (Channel {channel_idx})')
     
-    # Plot prediction
-    plt.subplot(3, 1, 3)
-    plt.plot(pred[channel_idx])
-    plt.title(f'Model Prediction (Channel {channel_idx})')
+#     # Plot prediction
+#     plt.subplot(3, 1, 3)
+#     plt.plot(pred[channel_idx])
+#     plt.title(f'Model Prediction (Channel {channel_idx})')
     
-    plt.tight_layout()
+#     plt.tight_layout()
     
-    # Save figure to wandb
-    if wandb.run is not None:
-        wandb.log({"prediction_visualization": wandb.Image(plt)})
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"prediction_visualization": wandb.Image(plt)})
     
-    plt.show()
+#     plt.show()
 
 def monitor_sigma_values_and_loss(history):
     """
@@ -401,7 +405,7 @@ def monitor_sigma_values_and_loss(history):
     # Plot loss
     plt.subplot(2, 2, 1)
     plt.plot(history['train_loss'], label='Training Loss')
-    plt.plot(history['test_loss'], label='Validation Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
     plt.title('Model Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -410,7 +414,7 @@ def monitor_sigma_values_and_loss(history):
     # Plot MAE
     plt.subplot(2, 2, 2)
     plt.plot(history['train_mae'], label='Training MAE')
-    plt.plot(history['test_mae'], label='Validation MAE')
+    plt.plot(history['val_mae'], label='Validation MAE')
     plt.title('Model MAE')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
@@ -453,18 +457,17 @@ def main():
     # Model parameters
     lr_channel_names = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1', 'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4'] # Low-resolution setup (fewer channels)
     hr_channel_names = all_channels # High-resolution setup (all channels)
-    event_mode = "fixed_length_event"
-    event_duration = 4
-    d_s = 60
-    d_t = 60
+    eeg_epoch_mode = "fixed_length"
+    fixed_length_duration = 6
+    alpha_t = 0.60
+    alpha_s = 0.75
     r_mlp = 4 # amplification factor for MLP layers
-    num_attn_heads = 2
     dropout_rate = 0.5
     L_s = 1  # Number of spatial layers
     L_t = 1  # Number of temporal layers
 
     # Training parameters
-    batch_size = 36
+    batch_size = 30
     epochs = 30
 
     # Optimizer parameters
@@ -474,30 +477,29 @@ def main():
     beta_2 = 0.95
 
     # Dataset parameters
-    test_size = 0.2
+    dataset_split = "70/25/5"
     
     # Create data loaders
-    train_loader, test_loader = get_data_loaders(
+    train_loader, val_loader = get_data_loaders(
         lr_channel_names=lr_channel_names,
         hr_channel_names=hr_channel_names,
         batch_size=batch_size,
-        test_size=test_size,
-        event_mode=event_mode,
-        event_duration=event_duration
+        dataset_split=dataset_split,
+        eeg_epoch_mode=eeg_epoch_mode,
+        fixed_length_duration=fixed_length_duration
     )
     
     # Get sample data to determine time_steps
-    sample_item = train_loader.dataset.get_item_at_index(0)
-    time_steps = sample_item["lo_res_epoch_item"].shape[1]
+    sample_item = train_loader.dataset[0]
+    time_steps = sample_item["lo_res"].shape[1]
     
     # Create the model
     model, sigmas = create_estformer_model(
         lr_channel_names=lr_channel_names,
         hr_channel_names=hr_channel_names,
         time_steps=time_steps,
-        d_s=d_s,
-        d_t=d_t,
-        num_attn_heads=num_attn_heads,
+        alpha_s=alpha_s,
+        alpha_t=alpha_t,
         r_mlp=r_mlp,
         dropout_rate=dropout_rate,
         L_s=L_s,
@@ -516,11 +518,11 @@ def main():
     history = train_estformer(
         model=model,
         train_loader=train_loader,
-        test_loader=test_loader,
+        val_loader=val_loader,
         sigmas=sigmas,
         device=device,
-        event_mode=event_mode,
-        event_duration=event_duration,
+        eeg_epoch_mode=eeg_epoch_mode,
+        fixed_length_duration=fixed_length_duration,
         lr=lr,
         beta_1=beta_1,
         beta_2=beta_2,
@@ -533,7 +535,7 @@ def main():
     monitor_sigma_values_and_loss(history)
     
     # Visualize results
-    visualize_results(model, test_loader.dataset, device)
+    # visualize_results(model, val_loader.dataset, device)
     
     print("Training completed successfully!")
 
