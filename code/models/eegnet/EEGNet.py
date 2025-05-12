@@ -266,7 +266,7 @@ class EEGNet(nn.Module):
 
         # Parameters for encoder vs classifier
         # enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
-        classifier_params = [p for name, p in self.named_parameters() if 'classifier' in name]
+        classifier_params = [p for name, p in self.named_parameters()] #if 'classifier' in name]
 
         # optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
         optimizer_classifier = torch.optim.Adam(classifier_params, lr=lr)
@@ -283,12 +283,12 @@ class EEGNet(nn.Module):
                 for i in range(len(lo_res)):
                     X, y = lo_res[i], one_hot_encoding[i]
                     X = X.unsqueeze(0).to(device)
-                    y = y.unsqueeze(0).to(device)
+                    y = y.unsqueeze(0).to(torch.float32).to(device)
                     # image_embed = embeds.unsqueeze(0).to(device)
 
                     logits = self(X)
-                    print(logits)
-                    print(y)
+                    # print(logits.dtype)
+                    # print(y.dtype)
 
                     # # Training Encoder
                     # for param in classifier_params:
