@@ -238,7 +238,6 @@ class EEGNet(nn.Module):
     
     def forward(self, x):
         x = self._feature_forward(x)
-        breakpoint()
         x = self.flatten(x)
         clip_embed = self.eeg_to_clip(x)
         logits = self.classifier(clip_embed)
@@ -255,7 +254,7 @@ class EEGNet(nn.Module):
             probs = torch.sigmoid(logits)
         return probs
     
-    def fit(self, generator, cocohandler, epochs, device, lr=1e-4, res='lo_res'): 
+    def fit(self, generator, epochs, device, lr=1e-4, res='lo_res'): 
         """
             X is zip(metadata, eeg)
         """
@@ -278,20 +277,22 @@ class EEGNet(nn.Module):
 
             progress_bar = tqdm(generator, desc=f"Epoch {epoch}/{epochs}", leave=True)
             for batch in progress_bar:
-                X = batch[res]
+                lo_res = batch[res]
+                one_hot_encoding = batch['one_hot_encoding']
                 
-                for i, img_id in enumerate(batch['coco_id']):
-                    eeg = X[i]
-                    eeg = eeg.unsqueeze(0).to(device)
-                    y = cocohandler(img_id - 1)
-                    label = y.unsqueeze(0).to(device)
+                for i in range(len(lo_res)):
+                    X, y = lo_res[i], one_hot_encoding[i]
+                    X = X.unsqueeze(0).to(device)
+                    y = y.unsqueeze(0).to(device)
                     # image_embed = embeds.unsqueeze(0).to(device)
 
-                    logits = self(eeg)
+                    logits = self(X)
+                    print(logits)
+                    print(y)
 
-                    # Training Encoder
-                    for param in classifier_params:
-                        param.requires_grad = False
+                    # # Training Encoder
+                    # for param in classifier_params:
+                    #     param.requires_grad = False
 
                     # optimizer_encoder.zero_grad()
                     # embed_loss = mse_loss_fn(clip_embed, image_embed)
@@ -302,17 +303,17 @@ class EEGNet(nn.Module):
                     # for param in enc_params:
                         # param.requires_grad = True
 
-                    for param in classifier_params:
-                        param.requires_grad = True
+                    # for param in classifier_params:
+                    #     param.requires_grad = True
 
                     optimizer_classifier.zero_grad()
-                    cls_loss = bce_loss_fn(logits, label)
+                    cls_loss = bce_loss_fn(logits, y)
                     cls_loss.backward()
                     optimizer_classifier.step()
 
-                    # Reset all Params
-                    for params in self.parameters():
-                        params.requires_grad = True
+                    # # Reset all Params
+                    # for params in self.parameters():
+                    #     params.requires_grad = True
 
                     total_cls_loss += cls_loss.item()
                     # total_mse += embed_loss.item()
@@ -323,7 +324,7 @@ class EEGNet(nn.Module):
             print(f'Epoch {epoch}: Classification Loss: {avg_cls_loss:.4f}')
 
 if __name__ == '__main__':
-    coco_data = COCODataHandler.from_file('S:\\PolySecLabProjects\\eeg-image-decode\\data\\all-joined-1\\coco-train17-captions-and-categories.json')
+    coco_data = COCODataHandler.get_instance()
 
     from torch.utils.data import DataLoader
     
@@ -348,4 +349,4 @@ if __name__ == '__main__':
     in_chns, input_window_samples = train_loader.dataset[0]['lo_res'].shape
 
     eegNet = EEGNet(in_chns, input_window_samples, n_classes)
-    eegNet.fit(train_loader, coco_data, 1, 'cuda')
+    eegNet.fit(train_loader, 1, 'cuda')

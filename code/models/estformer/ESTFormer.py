@@ -376,15 +376,6 @@ class ESTFormer(nn.Module):
         out = sim_out + trm_out
         out = self.norm(out)
         return out
-    
-    def predict(self, x, load_weights=False):
-        self.eval()
-        
-        if load_weights:
-            pass
-
-        with torch.no_grad():
-            return self.forward(x)
         
     def training_pass(self, epoch):
         self.train()
@@ -456,7 +447,7 @@ class ESTFormer(nn.Module):
         val_pcc = []
         
         with torch.no_grad():
-            progress_bar = tqdm(self.val_loader, desc=f"Validating...", leave=False)
+            progress_bar = tqdm(self.val_loader, desc=f"Running model on validation set...", leave=False)
             for batch in progress_bar:
                 lo_res = batch['lo_res'].float().to(self.device)
                 hi_res = batch['hi_res'].float().to(self.device)
@@ -567,8 +558,151 @@ class ESTFormer(nn.Module):
                     'val_loss': avg_val_loss,
                 }, checkpoint_path)
         
-        wandb.finish()
         return history
+    
+    def predict_on_test_set(self, test_loader):
+        self.eval()
+
+        self.sigmas.eval()
+        test_losses = []
+        test_maes = []
+        test_nmse = []
+        test_snr = []
+        test_pcc = []
+        
+        with torch.no_grad():
+            progress_bar = tqdm(test_loader, desc=f"Running model on test set...", leave=True)
+            for batch in progress_bar:
+                lo_res = batch['lo_res'].float().to(self.device)
+                hi_res = batch['hi_res'].float().to(self.device)
+                
+                # Forward pass
+                outputs = self(lo_res)
+                
+                # Compute loss
+                loss = reconstruction_loss(hi_res, outputs, self.sigmas.sigma1, self.sigmas.sigma2)
+                mae = compute_mean_absolute_error(hi_res, outputs)
+                nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+                snr = compute_signal_to_noise_ratio(hi_res, outputs)
+                pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
+                
+                # Track metrics
+                test_losses.append(loss.item())
+                test_maes.append(mae.item())
+                test_nmse.append(nmse.item())
+                test_snr.append(snr.item())
+                test_pcc.append(pcc.item())
+
+                # Free memory
+                del lo_res, hi_res, outputs, loss, mae
+                torch.cuda.empty_cache()
+        
+        # Compute epoch metrics
+        avg_test_loss = np.mean(test_losses)
+        avg_test_mae = np.mean(test_maes)
+        avg_test_nmse = np.mean(test_nmse)
+        avg_test_snr = np.mean(test_snr)
+        avg_test_pcc = np.mean(test_pcc)
+
+        avg_results = {
+           'avg_test_loss': avg_test_loss, 
+           'avg_test_mae': avg_test_mae, 
+           'avg_test_nmse': avg_test_nmse, 
+           'avg_test_snr': avg_test_snr, 
+           'avg_test_pcc': avg_test_pcc
+        }
+
+        return avg_results
+    
+    # def upsample(self, x, save_to_h5=True):
+        # self.
+
+
+
+# def monitor_sigma_values_and_loss(history):
+#     """
+#     Monitor the values of sigma1 and sigma2 during training.
+    
+#     Args:
+#         history: Training history dictionary
+#     """
+#     # Get the values of sigma1 and sigma2
+#     sigma1_values = history['sigma1']
+#     sigma2_values = history['sigma2']
+    
+#     print(f"Final sigma1 value: {sigma1_values[-1]}")
+#     print(f"Final sigma2 value: {sigma2_values[-1]}")
+    
+#     # Plot the loss history
+#     plt.figure(figsize=(12, 8))
+    
+#     # Plot loss
+#     plt.subplot(2, 2, 1)
+#     plt.plot(history['train_loss'], label='Training Loss')
+#     plt.plot(history['val_loss'], label='Validation Loss')
+#     plt.title('Model Loss')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Loss')
+#     plt.legend()
+    
+#     # Plot MAE
+#     plt.subplot(2, 2, 2)
+#     plt.plot(history['train_mae'], label='Training MAE')
+#     plt.plot(history['val_mae'], label='Validation MAE')
+#     plt.title('Model MAE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('MAE')
+#     plt.legend()
+
+#     # Plot NMSE
+#     plt.subplot(2, 2, 3)
+#     plt.plot(history['train_nmse'], label='Training NMSE')
+#     plt.plot(history['val_nmse'], label='Validation NMSE')
+#     plt.title('Model NMSE')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('NMSE')
+#     plt.legend()
+
+#     # Plot SNR
+#     plt.subplot(2, 2, 4)
+#     plt.plot(history['train_snr'], label='Training SNR')
+#     plt.plot(history['val_snr'], label='Validation SNR')
+#     plt.title('Model SNR')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('SNR')
+#     plt.legend()
+    
+#     # Plot PCC
+#     plt.subplot(2, 2, 5)
+#     plt.plot(history['train_pcc'], label='Training PCC')
+#     plt.plot(history['val_pcc'], label='Validation PCC')
+#     plt.title('Model PCC')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('PCC')
+#     plt.legend()
+    
+#     # Plot sigma values
+#     plt.subplot(2, 2, 3)
+#     plt.plot(sigma1_values, label='Sigma1')
+#     plt.title('Sigma1 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
+    
+#     plt.subplot(2, 2, 4)
+#     plt.plot(sigma2_values, label='Sigma2')
+#     plt.title('Sigma2 Value')
+#     plt.xlabel('Epoch')
+#     plt.ylabel('Value')
+    
+#     plt.tight_layout()
+    
+#     # Save figure to wandb
+#     if wandb.run is not None:
+#         wandb.log({"training_history": wandb.Image(plt)})
+    
+#     plt.show()
+
+
 
 # def main():
 #     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" # Force CUDA to use the GPU
@@ -763,10 +897,15 @@ class ESTFormer(nn.Module):
 #         optimizer=optimizer,
 #         checkpoint_dir='checkpoints'
 #     )
-
+#     
+#     average_test_results = model.predict_on_test_set(test_loader)
+#     print("Average Results on Test Set: ", average_test_results)
+#
 #     # monitor_sigma_values_and_loss(history)
 #     # visualize_results(model, val_loader.dataset, device)
 #     print("Training completed successfully!")
+
+#     wandb.finish()
 
 # if __name__ == '__main__':
 #     main()

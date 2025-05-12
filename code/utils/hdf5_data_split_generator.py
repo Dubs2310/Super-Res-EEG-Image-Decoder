@@ -5,10 +5,11 @@ import h5py
 import numpy as np
 from math import ceil
 from torch.utils.data import Dataset
+from utils.coco_data_handler import COCODataHandler
 from sklearn.model_selection import train_test_split
 
 class HDF5DataSplitGenerator(Dataset):
-    def __init__(self, h5_file_path=None, dataset_type="train", dataset_split="70/25/5", random_state=97, eeg_epoch_mode="fixed_length", fixed_length_duration=8, duration_before_onset=0.05, duration_after_onset=0.6, lr_channel_names=None, hr_channel_names=None, data_dir=None, create_if_not_exists=True):
+    def __init__(self, h5_file_path=None, dataset_type="train", dataset_split="70/25/5", random_state=97, eeg_epoch_mode="fixed_length", fixed_length_duration=8, duration_before_onset=0.05, duration_after_onset=0.6, lr_channel_names=None, hr_channel_names=None, data_dir=None, create_if_not_exists=True, subject='cross', session=None):
         """
         Initialize the data generator
 
@@ -53,6 +54,12 @@ class HDF5DataSplitGenerator(Dataset):
             
         create_if_not_exists: bool
             Whether to create the dataset if it doesn't exist in the h5 file
+            
+        subject: str or int
+            Subject to use. 'cross' means all subjects (default). Integer specifies a specific subject.
+            
+        session: int or None
+            Session to use. Required if subject is not 'cross'.
         """
         
         if eeg_epoch_mode not in ['fixed_length', 'around_evoked_event']:
@@ -63,6 +70,20 @@ class HDF5DataSplitGenerator(Dataset):
         
         if dataset_type not in ['train', 'test', 'val']:
             raise ValueError("dataset_type must be one of ['train', 'test', 'val']")
+        
+        # validate subject and session parameters
+        if subject != 'cross' and session is None:
+            raise ValueError("session parameter must be provided when subject is not 'cross'")
+        
+        # Convert subject to int if it's not 'cross'
+        if subject != 'cross':
+            try:
+                subject = int(subject)
+            except ValueError:
+                raise ValueError("subject must be 'cross' or an integer")
+        
+        self.subject = subject
+        self.session = session
         
         # use regex to check if the dataset_split is in the format 'train/test' or 'train/val/test'
         if not dataset_split or not isinstance(dataset_split, str) or not re.match(r'^\d+/\d+(/\d+)?$', dataset_split):
@@ -98,12 +119,17 @@ class HDF5DataSplitGenerator(Dataset):
             with h5py.File(self.h5_file_path, 'w') as f:
                 pass
         
-        # Generate keys for the h5 file based on the selected mode
+        # Generate keys for the h5 file based on the selected mode and subject/session
+        if self.subject == 'cross':
+            subject_session_prefix = ''
+        else:
+            subject_session_prefix = f"subj0{self.subject}_session{self.session}_"
+        
         if self.eeg_epoch_mode == 'fixed_length':
-            self.epochs_key = f"all_{fixed_length_duration}s_epochs"
+            self.epochs_key = f"{subject_session_prefix}all_{fixed_length_duration}s_epochs"
         else:  # around_evoked_event
             duration = self.duration_before_onset + self.duration_after_onset
-            self.epochs_key = f"all_{duration}_evoked_event_epochs"
+            self.epochs_key = f"{subject_session_prefix}all_{duration}_evoked_event_epochs"
         
         self.metadata_key = f"{self.epochs_key}_metadata"
 
@@ -128,7 +154,10 @@ class HDF5DataSplitGenerator(Dataset):
             # If fixed_length mode, pre-load evoked events metadata for later use
             if self.eeg_epoch_mode == 'fixed_length':
                 evoked_duration = self.duration_before_onset + self.duration_after_onset
-                self.evoked_epochs_key = f"all_{evoked_duration}_evoked_event_epochs"
+                if self.subject == 'cross':
+                    self.evoked_epochs_key = f"all_{evoked_duration}_evoked_event_epochs"
+                else:
+                    self.evoked_epochs_key = f"subj0{self.subject}_session{self.session}_all_{evoked_duration}_evoked_event_epochs"
                 self.evoked_metadata_key = f"{self.evoked_epochs_key}_metadata"
                 
                 if self.evoked_metadata_key in f:
@@ -136,23 +165,23 @@ class HDF5DataSplitGenerator(Dataset):
                 else:
                     self.all_evoked_metadata = None
             else:  # around_evoked_event
-                self.fixed_length_epochs_key = f"all_{fixed_length_duration}s_epochs"
+                if self.subject == 'cross':
+                    self.fixed_length_epochs_key = f"all_{fixed_length_duration}s_epochs"
+                else:
+                    self.fixed_length_epochs_key = f"subj0{self.subject}_session{self.session}_all_{fixed_length_duration}s_epochs"
                 self.fixed_length_metadata_key = f"{self.fixed_length_epochs_key}_metadata"
         
         # Split indices for train/test sets
         all_indices = np.arange(self.num_epochs)
-        # self.train_indices, self.test_indices = train_test_split(
-        #     all_indices, test_size=test_size, random_state=random_state
-        # )
         try:
             if len(parts) == 2:
-                train_pct, test_pct = parts
+                _, test_pct = parts
                 self.train_indices, self.test_indices = train_test_split(
                     all_indices, test_size=test_pct / 100, random_state=random_state
                 )
 
             elif len(parts) == 3:
-                train_pct, val_pct, test_pct = parts
+                _, val_pct, test_pct = parts
                 # Split off train
                 self.train_indices, temp = train_test_split(
                     all_indices, test_size=(val_pct + test_pct) / 100, random_state=random_state
@@ -166,7 +195,6 @@ class HDF5DataSplitGenerator(Dataset):
             raise ValueError(f"Ensure the dataset split is in the format 'train/val/test' or 'train/test'. Separately, the fixed length duration may be dividing the data into smaller chunks than expected, leaving 0 samples for the test set. Try adjusting the fixed length duration.")
         
         # Use appropriate indices based on dataset_type
-        # self.indices = self.train_indices if dataset_type == "train" else self.test_indices
         if dataset_type == "train":
             self.indices = self.train_indices
         elif dataset_type == "test":
@@ -239,12 +267,18 @@ class HDF5DataSplitGenerator(Dataset):
                 sfreq = f['sfreq'][()]
                 ch_names = [ch.decode('utf-8') for ch in f['ch_names'][()]]
             
+            # Define subject-session prefix
+            if self.subject == 'cross':
+                subject_session_prefix = ''
+            else:
+                subject_session_prefix = f"subj0{self.subject}_session{self.session}_"
+            
             # Define keys for both types of datasets
-            fixed_length_key = f"all_{self.fixed_length_duration}s_epochs"
+            fixed_length_key = f"{subject_session_prefix}all_{self.fixed_length_duration}s_epochs"
             fixed_length_metadata_key = f"{fixed_length_key}_metadata"
             
             evoked_duration = self.duration_before_onset + self.duration_after_onset
-            evoked_event_key = f"all_{evoked_duration}_evoked_event_epochs"
+            evoked_event_key = f"{subject_session_prefix}all_{evoked_duration}_evoked_event_epochs"
             evoked_event_metadata_key = f"{evoked_event_key}_metadata"
             
             # Check if datasets need to be created and populated
@@ -291,8 +325,12 @@ class HDF5DataSplitGenerator(Dataset):
             
             # Now populate both datasets in a single pass through the files
             for file in preprocessed_files:
-                subject = int(file[5:6])
-                session = int(file[14:15])
+                file_subject = int(file[5:6])  # Extract subject from filename format
+                file_session = int(file[14:15])  # Extract session from filename format
+                
+                # Skip if we're looking for a specific subject/session and this isn't it
+                if self.subject != 'cross' and (file_subject != self.subject or file_session != self.session):
+                    continue
                 
                 # Load the raw data once for both epoch types
                 raw = mne.io.read_raw_fif(os.path.join(preprocessed_data_dir, file), preload=True)
@@ -306,8 +344,8 @@ class HDF5DataSplitGenerator(Dataset):
                     sample_numbers = fixed_epochs.events[:, 0]
                     
                     fixed_metadata = np.zeros((fixed_data.shape[0], 3), dtype=np.int32)
-                    fixed_metadata[:, 0] = subject
-                    fixed_metadata[:, 1] = session
+                    fixed_metadata[:, 0] = file_subject
+                    fixed_metadata[:, 1] = file_session
                     fixed_metadata[:, 2] = sample_numbers
                     
                     # Add data to the fixed length dataset
@@ -338,8 +376,8 @@ class HDF5DataSplitGenerator(Dataset):
                         
                         n_epochs = evoked_data.shape[0]
                         evoked_metadata = np.zeros((n_epochs, 4), dtype=np.int32)
-                        evoked_metadata[:, 0] = subject
-                        evoked_metadata[:, 1] = session
+                        evoked_metadata[:, 0] = file_subject
+                        evoked_metadata[:, 1] = file_session
                         evoked_metadata[:, 2] = sample_numbers[:n_epochs]
                         evoked_metadata[:, 3] = evoked_event_ids[:n_epochs]
                         
@@ -351,6 +389,13 @@ class HDF5DataSplitGenerator(Dataset):
                         
                         f[evoked_event_key][current_size:new_size] = evoked_data
                         f[evoked_event_metadata_key][current_size:new_size] = evoked_metadata
+            
+            # Check if datasets were populated
+            if need_fixed_length and f[fixed_length_key].shape[0] == 0:
+                print(f"Warning: No data was found for {fixed_length_key}. Check that files exist for subject {self.subject} and session {self.session}.")
+            
+            if need_evoked_event and f[evoked_event_key].shape[0] == 0:
+                print(f"Warning: No data was found for {evoked_event_key}. Check that files exist for subject {self.subject} and session {self.session}.")
 
 
     def __len__(self):
@@ -381,28 +426,6 @@ class HDF5DataSplitGenerator(Dataset):
         subject = metadata[0]
         session = metadata[1]
         sample_number = metadata[2]
-        
-        # # Prepare evoked_event_ids based on epoch mode
-        # if self.eeg_epoch_mode == 'around_evoked_event':
-        #     evoked_event_ids = [metadata[3]]
-        # elif self.eeg_epoch_mode == 'fixed_length':
-        #     # For fixed length events, find all evoked events within the epoch
-        #     evoked_event_ids = []
-        #     if self.all_evoked_metadata is not None:
-        #         # Calculate the end sample number
-        #         end_sample = sample_number + int(self.fixed_length_duration * self.sfreq)
-                
-        #         # Filter events that fall within our epoch's time range
-        #         matching_events = self.all_evoked_metadata[
-        #             (self.all_evoked_metadata[:, 0] == subject) &  # Same subject
-        #             (self.all_evoked_metadata[:, 1] == session) &  # Same session
-        #             (self.all_evoked_metadata[:, 2] >= sample_number) &  # Event starts after or at epoch start
-        #             (self.all_evoked_metadata[:, 2] < end_sample)  # Event starts before epoch ends
-        #         ]
-                
-        #         # Extract just the event IDs
-        #         if len(matching_events) > 0:
-        #             evoked_event_ids = matching_events[:, 3].tolist()
 
         # Return dictionary with all required info
         out = {
@@ -412,60 +435,33 @@ class HDF5DataSplitGenerator(Dataset):
             "total_duration": self.fixed_length_duration if self.eeg_epoch_mode == 'fixed_length' else self.duration_before_onset + self.duration_after_onset, 
             "subject": subject,
             "session": session,
-            "sample_number": sample_number,
-            "lo_res": lr_data,
+            "sample_number": sample_number,     # for fixed length, it is the sample at which the epoch started, for around evoked, it is the onset sample
+            "lo_res": lr_data, 
             "hi_res": hr_data,
         }
 
         if self.eeg_epoch_mode == 'around_evoked_event':
-            out["coco_id"] = metadata[3]
+            out['one_hot_encoding'], _ = COCODataHandler.get_instance()(metadata[3])
 
         return out
     
-    def get_evoked_event_metadata_for_item(self, index):
-        item_metadata = self.all_metadata[index]
-        subject = item_metadata[0]
-        session = item_metadata[1]
-        sample_number = item_metadata[2]
-
-        if self.eeg_epoch_mode == 'around_evoked_event':
-            evoked_events_metadata = [(sample_number, item_metadata[3])]
+    # def get_all_evoked_event_metadata_within_fixed_length_item(self, index):
+    #     if not self.eeg_epoch_mode == 'fixed_length':
+    #         raise ValueError('This generator is set to epoch mode "around_evoked_event". To get the metadata, simply get the item by its index.')
+        
+    #     item_metadata = self.all_metadata[index]
+    #     subject = item_metadata[0]
+    #     session = item_metadata[1]
+    #     sample_number = item_metadata[2]
             
-        elif self.eeg_epoch_mode == 'fixed_length':
-            # For fixed length events, find all evoked events within the epoch
-            evoked_events_metadata = []
-            if self.all_evoked_metadata is not None:
-                # Calculate the end sample number
-                end_sample = sample_number + int(self.fixed_length_duration * self.sfreq)
-                
-                # Filter events that fall within our epoch's time range
-                matching_evoked_metadata = self.all_evoked_metadata[
-                    (self.all_evoked_metadata[:, 0] == subject) &  # Same subject
-                    (self.all_evoked_metadata[:, 1] == session) &  # Same session
-                    (self.all_evoked_metadata[:, 2] >= sample_number) &  # Event starts after or at epoch start
-                    (self.all_evoked_metadata[:, 2] < end_sample)  # Event starts before epoch ends
-                ]
-                
-                # Extract just the event IDs
-                if len(matching_evoked_metadata) > 0:
-                    evoked_events_metadata = matching_evoked_metadata[:[2, 3]].tolist()
-                    
-        return evoked_events_metadata
-    
-    # def extract_evoked_epochs_from_fixed_length(self, index):
-    #     metadata = self.all_metadata[index]
-    #     subject = metadata[0]
-    #     session = metadata[1]
-    #     sample_number = metadata[2]
-
     #     # For fixed length events, find all evoked events within the epoch
-    #     evoked_event_ids = []
+    #     evoked_events_metadata = []
     #     if self.all_evoked_metadata is not None:
     #         # Calculate the end sample number
     #         end_sample = sample_number + int(self.fixed_length_duration * self.sfreq)
             
     #         # Filter events that fall within our epoch's time range
-    #         matching_events = self.all_evoked_metadata[
+    #         matching_evoked_metadata = self.all_evoked_metadata[
     #             (self.all_evoked_metadata[:, 0] == subject) &  # Same subject
     #             (self.all_evoked_metadata[:, 1] == session) &  # Same session
     #             (self.all_evoked_metadata[:, 2] >= sample_number) &  # Event starts after or at epoch start
@@ -473,7 +469,7 @@ class HDF5DataSplitGenerator(Dataset):
     #         ]
             
     #         # Extract just the event IDs
-    #         if len(matching_events) > 0:
-    #             evoked_event_ids = matching_events[:, 3].tolist()
-        
-    #     return evoked_event_ids
+    #         if len(matching_evoked_metadata) > 0:
+    #             evoked_events_metadata = [(row[2], row[3]) for row in matching_evoked_metadata]
+                    
+    #     return evoked_events_metadata
