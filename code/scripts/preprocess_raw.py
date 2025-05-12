@@ -30,15 +30,6 @@ if not files:
 # _evoked_event_epochs = mne.Epochs(cropped, all_events, preload=True, tmin=-0.05, tmax=0.6)
 # _60s_epochs.get_data().shape, _30s_epochs.get_data().shape, _10s_epochs.get_data().shape, _evoked_event_epochs.get_data().shape
 
-def apply_zscore_normalization(raw):
-    """Apply channel-wise z-score normalization to the EEG data"""
-    data = raw.get_data()
-    for i in range(data.shape[0]):  # Loop over channels
-        channel_data = data[i, :]
-        data[i, :] = stats.zscore(channel_data, nan_policy='omit') # Calculate z-score: (x - mean) / std
-    raw._data = data
-    return raw
-
 for file in files:
 
     # don't read any file other than the raw .fif file
@@ -62,19 +53,31 @@ for file in files:
         montage = mne.channels.make_standard_montage('standard_1020')
         filtered.set_montage(montage)
         filtered.set_eeg_reference('average')
-
         filtered.filter(l_freq=0.5, h_freq=95)
         filtered.notch_filter(freqs=60)
-
+        
         ica_cleaned = filtered.copy()
         ica = mne.preprocessing.ICA(n_components=.95, random_state=97)
         ica = ica.fit(ica_cleaned)
         ica.exclude = [1]
         ica_cleaned = ica.apply(ica_cleaned)
 
-        # fig1, fig2, fig3 = raw.plot(show=True), filtered.plot(show=True), ica_cleaned.plot(show=True)
-        normalized = apply_zscore_normalization(ica_cleaned.copy())
+        # 1. First extract events and annotations
+        events = mne.find_events(ica_cleaned, stim_channel='Status')
+        original_annotations = ica_cleaned.annotations.copy()
+        picks = mne.pick_types(ica_cleaned.info, eeg=True, stim=False)
 
+        # 2. Z-score only EEG channels (excluding stim channels)
+        ica_cleaned = ica_cleaned.get_data(picks=picks)
+        ica_cleaned = (ica_cleaned - ica_cleaned.mean(axis=1, keepdims=True)) / ica_cleaned.std(axis=1, keepdims=True)
+
+        # 3. Create normalized raw with original events
+        normalized = raw.copy()
+        normalized._data[picks] = ica_cleaned
+        normalized.set_annotations(original_annotations)
+
+        # fig1, fig2, fig3 = raw.plot(show=True), filtered.plot(show=True), ica_cleaned.plot(show=True)
+        # normalized = zscore_normalize_raw(ica_cleaned.copy())
         all_events = mne.find_events(normalized)
         first_event_time = all_events[0, 0] / normalized.info['sfreq'] - 0.05  # 50ms before first event
         last_event_time = all_events[-1, 0] / normalized.info['sfreq'] + 0.6   # 600ms after last event
