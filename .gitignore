@@ -1,7 +1,6 @@
 data/all-joined-1/eeg
-**comprehensive_dataset.h5
 env/
 **/__pycache__/
 **/.DS_Store
-**/checkpoints/
-**/wandb/
+**wandb/
+**checkpoints/
