@@ -12,12 +12,12 @@ from mne.channels import make_standard_montage, get_builtin_montages
 
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", '..'))
-from utils.hdf5_data_split_generator import HDF5DataSplitGenerator
+from utils.epoch_data_reader import EpochDataReader
 from utils.metrics import (
-    mae as compute_mean_absolute_error, 
-    nmse as compute_normalized_mean_squared_error, 
-    pcc as compute_pearson_correlation_coefficient,
-    snr as compute_signal_to_noise_ratio,
+    # mae as compute_mean_absolute_error, 
+    # nmse as compute_normalized_mean_squared_error, 
+    # pcc as compute_pearson_correlation_coefficient,
+    # snr as compute_signal_to_noise_ratio,
     loss as reconstruction_loss,
 )
 
@@ -357,7 +357,7 @@ class ESTFormer(nn.Module):
         self.time_steps = time_steps
         self.dropout_rate = dropout_rate
 
-        self.sigmas = SigmaParameters().to(device)
+        self.sigmas = SigmaParameters()
         d_t = roundUpToNearestMultipleOfN(alpha_t * time_steps, 3)
         d_s = roundUpToNearestMultipleOfN(alpha_s * self.num_hr_channels, 2)
         self.mask_token = nn.Parameter(torch.zeros((1, 1, d_t)))
@@ -380,17 +380,24 @@ class ESTFormer(nn.Module):
     def training_pass(self, epoch):
         self.train()
         self.sigmas.train()
+        self.lo_res_loader.dataset.set_split_type('train')
+        self.hi_res_loader.dataset.set_split_type('train')
+
         train_losses = []
-        train_maes = []
-        train_nmse = []
-        train_snr = []
-        train_pcc = []
+        # train_maes = []
+        # train_nmse = []
+        # train_snr = []
+        # train_pcc = []
 
-        progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.epochs}", leave=True)
+        progress_bar = tqdm(zip(self.lo_res_loader, self.hi_res_loader), desc=f"Epoch {epoch+1}/{self.epochs}", leave=True, total=min(len(self.lo_res_loader), len(self.hi_res_loader)))
 
-        for i, batch in enumerate(progress_bar):
-            lo_res = batch['lo_res'].float().to(self.device)
-            hi_res = batch['hi_res'].float().to(self.device)
+        for i, (lo_res_batch, hi_res_batch) in enumerate(progress_bar):
+            if len(lo_res_batch) == 2 and len(hi_res_batch) == 2:
+                lo_res = lo_res_batch[0].float().to(self.device)
+                hi_res = hi_res_batch[0].float().to(self.device)
+            else:
+                lo_res = lo_res_batch.float().to(self.device)
+                hi_res = hi_res_batch.float().to(self.device)
 
             # Forward pass
             self.optimizer.zero_grad()
@@ -398,10 +405,10 @@ class ESTFormer(nn.Module):
 
             # Compute loss
             loss = reconstruction_loss(hi_res, outputs, self.sigmas.sigma1, self.sigmas.sigma2)
-            mae = compute_mean_absolute_error(hi_res, outputs)
-            nmse = compute_normalized_mean_squared_error(hi_res, outputs)
-            snr = compute_signal_to_noise_ratio(hi_res, outputs)
-            pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
+            # mae = compute_mean_absolute_error(hi_res, outputs)
+            # nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+            # snr = compute_signal_to_noise_ratio(hi_res, outputs)
+            # pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
 
             # Backward pass and optimization
             loss.backward()
@@ -409,92 +416,106 @@ class ESTFormer(nn.Module):
 
             # Track metrics
             train_losses.append(loss.item())
-            train_maes.append(mae.item())
-            train_nmse.append(nmse.item())
-            train_snr.append(snr.item())
-            train_pcc.append(pcc.item())
+            # train_maes.append(mae.item())
+            # train_nmse.append(nmse.item())
+            # train_snr.append(snr.item())
+            # train_pcc.append(pcc.item())
 
             # Update tqdm bar with metrics
             if i % 10 == 0:
-                progress_bar.set_postfix(loss=f"{loss.item():.4f}", mae=f"{mae.item():.4f}", nmse=f"{nmse.item():.4f}", snr=f"{snr.item():.4f}", pcc=f"{pcc.item():.4f}")
+                progress_bar.set_postfix(
+                    loss=f"{loss.item():.4f}"
+                    # mae=f"{mae.item():.4f}", 
+                    # nmse=f"{nmse.item():.4f}", 
+                    # snr=f"{snr.item():.4f}", 
+                    # pcc=f"{pcc.item():.4f}"
+                )
 
             # Free memory
-            del lo_res, hi_res, outputs, loss, mae, nmse, snr, pcc
-            torch.cuda.empty_cache()
+            # del lo_res, hi_res, outputs, loss#, mae, nmse, snr, pcc
+            # torch.cuda.empty_cache()
         
         # Compute epoch metrics
         avg_train_loss = np.mean(train_losses)
-        avg_train_mae = np.mean(train_maes)
-        avg_train_nmse = np.mean(train_nmse)
-        avg_train_snr = np.mean(train_snr)
-        avg_train_pcc = np.mean(train_pcc)
+        # avg_train_mae = np.mean(train_maes)
+        # avg_train_nmse = np.mean(train_nmse)
+        # avg_train_snr = np.mean(train_snr)
+        # avg_train_pcc = np.mean(train_pcc)
 
         return {
            'loss': avg_train_loss, 
-           'mae': avg_train_mae, 
-           'nmse': avg_train_nmse, 
-           'snr': avg_train_snr, 
-           'pcc': avg_train_pcc
+        #    'mae': avg_train_mae, 
+        #    'nmse': avg_train_nmse, 
+        #    'snr': avg_train_snr, 
+        #    'pcc': avg_train_pcc
         }
 
     def validation_pass(self):
         self.eval()
         self.sigmas.eval()
+        self.lo_res_loader.dataset.set_split_type('val')
+        self.hi_res_loader.dataset.set_split_type('val')
+
         val_losses = []
-        val_maes = []
-        val_nmse = []
-        val_snr = []
-        val_pcc = []
+        # val_maes = []
+        # val_nmse = []
+        # val_snr = []
+        # val_pcc = []
         
         with torch.no_grad():
-            progress_bar = tqdm(self.val_loader, desc=f"Running model on validation set...", leave=False)
-            for batch in progress_bar:
-                lo_res = batch['lo_res'].float().to(self.device)
-                hi_res = batch['hi_res'].float().to(self.device)
-                
+            progress_bar = tqdm(zip(self.lo_res_loader, self.hi_res_loader), desc=f"Running model on validation set...", leave=False, total=min(len(self.lo_res_loader), len(self.hi_res_loader)))
+            for lo_res_batch, hi_res_batch in progress_bar:
+                if len(lo_res_batch) == 2 and len(hi_res_batch) == 2:
+                    lo_res = lo_res_batch[0].float().to(self.device)
+                    hi_res = hi_res_batch[0].float().to(self.device)
+                else:
+                    lo_res = lo_res_batch.float().to(self.device)
+                    hi_res = hi_res_batch.float().to(self.device)
+
                 # Forward pass
                 outputs = self(lo_res)
                 
                 # Compute loss
                 loss = reconstruction_loss(hi_res, outputs, self.sigmas.sigma1, self.sigmas.sigma2)
-                mae = compute_mean_absolute_error(hi_res, outputs)
-                nmse = compute_normalized_mean_squared_error(hi_res, outputs)
-                snr = compute_signal_to_noise_ratio(hi_res, outputs)
-                pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
+                # mae = compute_mean_absolute_error(hi_res, outputs)
+                # nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+                # snr = compute_signal_to_noise_ratio(hi_res, outputs)
+                # pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
                 
                 # Track metrics
                 val_losses.append(loss.item())
-                val_maes.append(mae.item())
-                val_nmse.append(nmse.item())
-                val_snr.append(snr.item())
-                val_pcc.append(pcc.item())
+                # val_maes.append(mae.item())
+                # val_nmse.append(nmse.item())
+                # val_snr.append(snr.item())
+                # val_pcc.append(pcc.item())
 
                 # Free memory
-                del lo_res, hi_res, outputs, loss, mae
-                torch.cuda.empty_cache()
+                # del lo_res, hi_res, outputs, loss#, mae, nmse, snr, pcc
+                # torch.cuda.empty_cache()
         
         # Compute epoch metrics
         avg_val_loss = np.mean(val_losses)
-        avg_val_mae = np.mean(val_maes)
-        avg_val_nmse = np.mean(val_nmse)
-        avg_val_snr = np.mean(val_snr)
-        avg_val_pcc = np.mean(val_pcc)
+        # avg_val_mae = np.mean(val_maes)
+        # avg_val_nmse = np.mean(val_nmse)
+        # avg_val_snr = np.mean(val_snr)
+        # avg_val_pcc = np.mean(val_pcc)
 
         return {
            'loss': avg_val_loss, 
-           'mae': avg_val_mae, 
-           'nmse': avg_val_nmse, 
-           'snr': avg_val_snr, 
-           'pcc': avg_val_pcc
+        #    'mae': avg_val_mae, 
+        #    'nmse': avg_val_nmse, 
+        #    'snr': avg_val_snr, 
+        #    'pcc': avg_val_pcc
         }
 
-    def fit(self, epochs, train_loader, val_loader, optimizer, checkpoint_dir):
+    def fit(self, epochs, lo_res_loader, hi_res_loader, optimizer, checkpoint_dir, identifier):
+        os.makedirs('checkpoints', exist_ok=True)
         self.epochs = epochs
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.lo_res_loader = lo_res_loader
+        self.hi_res_loader = hi_res_loader
         self.optimizer = optimizer
 
-        metrics = ['loss', 'mae', 'nmse', 'pcc', 'snr']
+        metrics = ['loss']#, 'mae', 'nmse', 'pcc', 'snr']
         history = { 'sigma1': [], 'sigma2': [] }
         for m in metrics:
             history[f'train_{m}'] = []
@@ -521,10 +542,10 @@ class ESTFormer(nn.Module):
                 history[key].append(v)
                 summary_str += f'{key}: {v:.4f}'
             
-            log_object['sigma1'] = s1
-            log_object['sigma2'] = s2
-            history['sigma1'].append(s1 := self.sigmas.sigma1.item())
-            history['sigma2'].append(s2 := self.sigmas.sigma2.item())
+            log_object['sigma1'] = (s1 := self.sigmas.sigma1.item())
+            log_object['sigma2'] = (s2 := self.sigmas.sigma2.item())
+            history['sigma1'].append(s1)
+            history['sigma2'].append(s2)
             summary_str += (
                 f"sigma1: {s1:.4f}, "
                 f"sigma2: {s2:.4f}"
@@ -536,11 +557,11 @@ class ESTFormer(nn.Module):
             avg_val_loss = log_object['val_loss']
             if avg_val_loss < self.best_val_loss:
                 self.best_val_loss = avg_val_loss
-                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_best.pt')
+                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_best.pt')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.state_dict(),
-                    # 'sigmas_state_dict': self.sigmas.state_dict(),
+                    'sigmas_state_dict': self.sigmas.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': avg_val_loss,
                 }, checkpoint_path)
@@ -549,7 +570,7 @@ class ESTFormer(nn.Module):
             
             # Save periodic checkpoint
             if (epoch + 1) % 5 == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_epoch_{epoch+1}.pt')
+                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_epoch_{epoch+1}.pt')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.state_dict(),
@@ -560,59 +581,65 @@ class ESTFormer(nn.Module):
         
         return history
     
-    def predict_on_test_set(self, test_loader):
+    def predict(self, eeg_lr):
         self.eval()
-
-        self.sigmas.eval()
-        test_losses = []
-        test_maes = []
-        test_nmse = []
-        test_snr = []
-        test_pcc = []
-        
         with torch.no_grad():
-            progress_bar = tqdm(test_loader, desc=f"Running model on test set...", leave=True)
-            for batch in progress_bar:
-                lo_res = batch['lo_res'].float().to(self.device)
-                hi_res = batch['hi_res'].float().to(self.device)
-                
-                # Forward pass
-                outputs = self(lo_res)
-                
-                # Compute loss
-                loss = reconstruction_loss(hi_res, outputs, self.sigmas.sigma1, self.sigmas.sigma2)
-                mae = compute_mean_absolute_error(hi_res, outputs)
-                nmse = compute_normalized_mean_squared_error(hi_res, outputs)
-                snr = compute_signal_to_noise_ratio(hi_res, outputs)
-                pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
-                
-                # Track metrics
-                test_losses.append(loss.item())
-                test_maes.append(mae.item())
-                test_nmse.append(nmse.item())
-                test_snr.append(snr.item())
-                test_pcc.append(pcc.item())
+            eeg_sr = self(eeg_lr)
+            return eeg_sr
+    
+    # def predict_on_test_set(self, dataloader):
+    #     self.eval()
 
-                # Free memory
-                del lo_res, hi_res, outputs, loss, mae
-                torch.cuda.empty_cache()
+    #     self.sigmas.eval()
+    #     test_losses = []
+    #     test_maes = []
+    #     test_nmse = []
+    #     test_snr = []
+    #     test_pcc = []
         
-        # Compute epoch metrics
-        avg_test_loss = np.mean(test_losses)
-        avg_test_mae = np.mean(test_maes)
-        avg_test_nmse = np.mean(test_nmse)
-        avg_test_snr = np.mean(test_snr)
-        avg_test_pcc = np.mean(test_pcc)
+    #     with torch.no_grad():
+    #         progress_bar = tqdm(dataloader, desc=f"Running model on test set...", leave=True)
+    #         for batch in progress_bar:
+    #             lo_res = batch['lo_res'].float().to(self.device)
+    #             hi_res = batch['hi_res'].float().to(self.device)
+                
+    #             # Forward pass
+    #             outputs = self(lo_res)
+                
+    #             # Compute loss
+    #             loss = reconstruction_loss(hi_res, outputs, self.sigmas.sigma1, self.sigmas.sigma2)
+    #             mae = compute_mean_absolute_error(hi_res, outputs)
+    #             nmse = compute_normalized_mean_squared_error(hi_res, outputs)
+    #             snr = compute_signal_to_noise_ratio(hi_res, outputs)
+    #             pcc = compute_pearson_correlation_coefficient(hi_res, outputs)
+                
+    #             # Track metrics
+    #             test_losses.append(loss.item())
+    #             test_maes.append(mae.item())
+    #             test_nmse.append(nmse.item())
+    #             test_snr.append(snr.item())
+    #             test_pcc.append(pcc.item())
 
-        avg_results = {
-           'avg_test_loss': avg_test_loss, 
-           'avg_test_mae': avg_test_mae, 
-           'avg_test_nmse': avg_test_nmse, 
-           'avg_test_snr': avg_test_snr, 
-           'avg_test_pcc': avg_test_pcc
-        }
+    #             # Free memory
+    #             del lo_res, hi_res, outputs, loss, mae
+    #             torch.cuda.empty_cache()
+        
+    #     # Compute epoch metrics
+    #     avg_test_loss = np.mean(test_losses)
+    #     avg_test_mae = np.mean(test_maes)
+    #     avg_test_nmse = np.mean(test_nmse)
+    #     avg_test_snr = np.mean(test_snr)
+    #     avg_test_pcc = np.mean(test_pcc)
 
-        return avg_results
+    #     avg_results = {
+    #        'avg_test_loss': avg_test_loss, 
+    #        'avg_test_mae': avg_test_mae, 
+    #        'avg_test_nmse': avg_test_nmse, 
+    #        'avg_test_snr': avg_test_snr, 
+    #        'avg_test_pcc': avg_test_pcc
+    #     }
+
+    #     return avg_results
     
     # def upsample(self, x, save_to_h5=True):
         # self.

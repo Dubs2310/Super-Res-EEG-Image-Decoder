@@ -11,7 +11,7 @@ args = parser.parse_args()
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 raw_data_dir = os.path.join(script_dir, '..', '..', 'data', 'all-joined-1', 'eeg', 'raw') if not args.raw_data_dir else args.raw_data_dir
-preprocessed_data_dir = os.path.join(script_dir, '..', '..', 'data', 'all-joined-1', 'eeg', 'preprocessed') if not args.preprocessed_data_dir else args.preprocessed_data_dir
+preprocessed_data_dir = os.path.join(script_dir, '..', '..', 'data', 'all-joined-1', 'eeg', 'preprocessed', 'ground-truth') if not args.preprocessed_data_dir else args.preprocessed_data_dir
 files = os.listdir(raw_data_dir)
 
 if not files:
@@ -55,7 +55,6 @@ for file in files:
         filtered.set_eeg_reference('average')
         filtered.filter(l_freq=0.5, h_freq=95)
         filtered.notch_filter(freqs=60)
-        
         ica_cleaned = filtered.copy()
         ica = mne.preprocessing.ICA(n_components=.95, random_state=97)
         ica = ica.fit(ica_cleaned)
@@ -64,17 +63,15 @@ for file in files:
 
         # 1. First extract events and annotations
         events = mne.find_events(ica_cleaned, stim_channel='Status')
-        original_annotations = ica_cleaned.annotations.copy()
         picks = mne.pick_types(ica_cleaned.info, eeg=True, stim=False)
 
         # 2. Z-score only EEG channels (excluding stim channels)
-        ica_cleaned = ica_cleaned.get_data(picks=picks)
-        ica_cleaned = (ica_cleaned - ica_cleaned.mean(axis=1, keepdims=True)) / ica_cleaned.std(axis=1, keepdims=True)
+        norm_data = ica_cleaned.get_data(picks=picks)
+        norm_data = (norm_data - norm_data.mean(axis=1, keepdims=True)) / norm_data.std(axis=1, keepdims=True)
 
         # 3. Create normalized raw with original events
-        normalized = raw.copy()
-        normalized._data[picks] = ica_cleaned
-        normalized.set_annotations(original_annotations)
+        normalized = ica_cleaned.copy()
+        normalized._data[picks] = norm_data
 
         # fig1, fig2, fig3 = raw.plot(show=True), filtered.plot(show=True), ica_cleaned.plot(show=True)
         # normalized = zscore_normalize_raw(ica_cleaned.copy())

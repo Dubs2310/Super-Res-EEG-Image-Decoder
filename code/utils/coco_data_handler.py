@@ -89,7 +89,7 @@ class COCODataHandler:
             tuple: A tuple containing the one-hot encoded vector and the category index mapping
         """
         one_hot = self._categories_one_hot[index]
-        return one_hot, self._category_index
+        return one_hot
     
     @classmethod
     def from_file(cls, file_path: str) -> 'COCODataHandler':
