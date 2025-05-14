@@ -508,8 +508,8 @@ class ESTFormer(nn.Module):
         #    'pcc': avg_val_pcc
         }
 
-    def fit(self, epochs, lo_res_loader, hi_res_loader, optimizer, checkpoint_dir, identifier):
-        os.makedirs('checkpoints', exist_ok=True)
+    def fit(self, epochs, lo_res_loader, hi_res_loader, optimizer, checkpoint_dir, identifier, use_checkpoint=False):
+        os.makedirs(checkpoint_dir, exist_ok=True)
         self.epochs = epochs
         self.lo_res_loader = lo_res_loader
         self.hi_res_loader = hi_res_loader
@@ -520,6 +520,33 @@ class ESTFormer(nn.Module):
         for m in metrics:
             history[f'train_{m}'] = []
             history[f'val_{m}'] = []
+
+        # Load from checkpoint if provided
+        checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_best.pt')
+        if use_checkpoint and os.path.exists(checkpoint_path):
+            print(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            self.load_state_dict(checkpoint['model_state_dict'])
+            
+            if 'sigmas_state_dict' in checkpoint:
+                self.sigmas.load_state_dict(checkpoint['sigmas_state_dict'])
+            
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Start from the next epoch after the saved one
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            
+            # Restore best validation loss if available
+            self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+            
+            print(f"Resuming training from epoch {start_epoch}")
+            
+            # Optionally restore history if saved in checkpoint
+            if 'history' in checkpoint:
+                history = checkpoint['history']
+        else:
+            if use_checkpoint:  # Only print if a path was provided but not found
+                print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
 
         self.best_val_loss = float('inf')
 
@@ -557,7 +584,6 @@ class ESTFormer(nn.Module):
             avg_val_loss = log_object['val_loss']
             if avg_val_loss < self.best_val_loss:
                 self.best_val_loss = avg_val_loss
-                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_best.pt')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.state_dict(),
@@ -568,16 +594,16 @@ class ESTFormer(nn.Module):
                 print(f"Saved best model checkpoint to {checkpoint_path}")
                 wandb.save(checkpoint_path, policy='now') # Log best model to wandb
             
-            # Save periodic checkpoint
-            if (epoch + 1) % 5 == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_epoch_{epoch+1}.pt')
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.state_dict(),
-                    'sigmas_state_dict': self.sigmas.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': avg_val_loss,
-                }, checkpoint_path)
+            # # Save periodic checkpoint
+            # if (epoch + 1) % 5 == 0:
+            #     checkpoint_path = os.path.join(checkpoint_dir, f'estformer_{identifier}_epoch_{epoch+1}.pt')
+            #     torch.save({
+            #         'epoch': epoch,
+            #         'model_state_dict': self.state_dict(),
+            #         'sigmas_state_dict': self.sigmas.state_dict(),
+            #         'optimizer_state_dict': self.optimizer.state_dict(),
+            #         'val_loss': avg_val_loss,
+            #     }, checkpoint_path)
         
         return history
     
