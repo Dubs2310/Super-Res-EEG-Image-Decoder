@@ -1,14 +1,19 @@
 import sys
 import os
 import torch
-from tqdm import tqdm
+import wandb
 import torch.nn as nn
+import numpy as np
+from tqdm import tqdm
 from torch.nn.functional import elu
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
 
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", '..'))
 from utils.coco_data_handler import COCODataHandler
 from utils.epoch_data_reader import EpochDataReader
+
+import warnings
+warnings.filterwarnings("ignore")
 
 def _transpose_to_b_1_c_0(x):
     """Transpose input from [batch, channels, time, 1] to [batch, 1, channels, time]."""
@@ -242,7 +247,7 @@ class EEGNet(nn.Module):
     
     def forward(self, x):
         x = self._feature_forward(x)
-        x = self.flatten(x)
+        x = self.flatten(x.contiguous())
         clip_embed = self.eeg_to_clip(x)
         logits = self.classifier(clip_embed)
 
@@ -256,17 +261,173 @@ class EEGNet(nn.Module):
             clip_embed = self.eeg_to_clip(x)
             logits = self.classifier(clip_embed)
             probs = torch.sigmoid(logits)
-        return probs
+            probs = probs.detach().cpu().numpy() 
+            preds = (probs > 0.5).astype(int)
+        return preds
+    
+    def train_pass(self, epoch):
+        self.train()
+        self.loader.dataset.set_split_type('train')
+
+        # mse_loss_fn = nn.MSELoss()
+        bce_loss_fn = nn.BCEWithLogitsLoss()
+
+        train_losses = []
+        train_accuracies = []
+
+        progress_bar = tqdm(self.loader, desc=f"Epoch {epoch}/{self.epochs}", leave=True)
+        for batch in progress_bar:
+            epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
+            one_hot_encoding = batch[1]
+            batch_losses = []
+            batch_logits = []
+            
+            for i in range(len(epochs)):
+                X, y = epochs[i], one_hot_encoding[i]
+                X = X.unsqueeze(0).to(self.device)
+                y = y.unsqueeze(0).to(torch.float32).to(self.device)
+                # image_embed = embeds.unsqueeze(0).to(device)
+
+                logits = self(X)
+                # print(logits.dtype)
+                # print(y.dtype)
+
+                # # Training Encoder
+                # for param in classifier_params:
+                #     param.requires_grad = False
+
+                # optimizer_encoder.zero_grad()
+                # embed_loss = mse_loss_fn(clip_embed, image_embed)
+                # embed_loss.backward()
+                # optimizer_encoder.step()
+
+                # Training Classifier
+                # for param in enc_params:
+                    # param.requires_grad = True
+
+                # for param in classifier_params:
+                #     param.requires_grad = True
+
+                self.optimizer.zero_grad()
+                cls_loss = bce_loss_fn(logits, y)
+                cls_loss.backward()
+                self.optimizer.step()
+
+                # # Reset all Params
+                # for params in self.parameters():
+                #     params.requires_grad = True
+
+                batch_losses.append(cls_loss.item())
+                batch_logits.append(torch.sigmoid(logits).detach().cpu())
+                # total_mse += embed_loss.item()
+            
+            train_losses.append(np.mean(batch_losses))
+            
+            logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
+            preds = (logits_array > 0.5).astype(int)
+            train_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
+
+            progress_bar.set_postfix(
+                loss=f"{train_losses[-1]:.4f}",
+                acc=f"{train_accuracies[-1]:.4f}"
+            )
+        
+        # avg_mse = total_mse / len(generator.batch_size)
+        avg_cls_loss = np.mean(train_losses)
+        avg_cls_acc = np.mean(train_accuracies)
+
+        return {
+           'loss': avg_cls_loss,
+           'acc': avg_cls_acc
+        }
+
+    def validation_pass(self):
+        self.eval()
+        self.loader.dataset.set_split_type('val')
+
+        bce_loss_fn = nn.BCEWithLogitsLoss()
+
+        val_losses = []
+        val_accuracies = []
+
+        with torch.no_grad():
+            progress_bar = tqdm(self.loader, desc="Running model on validation set...", leave=False)
+            for batch in progress_bar:
+                epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
+                one_hot_encoding = batch[1]
+                batch_losses = []
+                batch_logits = []
+
+                for i in range(len(epochs)):
+                    X, y = epochs[i], one_hot_encoding[i]
+                    X = X.unsqueeze(0).to(self.device)
+                    y = y.unsqueeze(0).to(torch.float32).to(self.device)
+
+                    logits = self(X)
+
+                    loss = bce_loss_fn(logits, y)
+                    batch_losses.append(loss)
+                    batch_logits.append(torch.sigmoid(logits).detach().cpu())
+                
+                val_losses.append(np.mean(batch_losses))
+
+                logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
+                preds = (logits_array > 0.5).astype(int)
+                val_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
+            
+        avg_val_loss = np.mean(val_losses)
+        avg_val_acc = np.mean(val_accuracies)
+
+        return {
+           'loss': avg_val_loss,
+           'acc': avg_val_acc
+        }
+
+
     
     def fit(self, loader, epochs, optimizer, checkpoint_dir, identifier, use_checkpoint=False): #lr=1e-4, 
         """
             X is zip(metadata, eeg)
         """
-        self.train()
-        loader.dataset.set_split_type("train")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        self.epochs = epochs
+        self.optimizer = optimizer
+        self.loader = loader
+        start_epoch = 1
 
-        # mse_loss_fn = nn.MSELoss()
-        bce_loss_fn = nn.BCEWithLogitsLoss()
+        metrics = ['loss', 'acc']
+        history = {}
+
+        for m in metrics:
+            history[f'train_{m}'] = []
+            history[f'val_{m}'] = []
+
+        checkpoint_path = os.path.join(checkpoint_dir, f'eegnet_{identifier}_best.pt')
+        if use_checkpoint and os.path.exists(checkpoint_path):
+            print(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            self.load_state_dict(checkpoint['model_state_dict'])
+            
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Start from the next epoch after the saved one
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            
+            # Restore best validation loss if available
+            self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+            
+            if start_epoch < self.epochs:
+                print(f"Resuming training from epoch {start_epoch}")
+            
+            # Optionally restore history if saved in checkpoint
+            if 'history' in checkpoint:
+                history = checkpoint['history']
+        else:
+            if use_checkpoint:  # Only print if a path was provided but not found
+                print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
+
+        self.best_val_loss = float('inf')
+
 
         # Parameters for encoder vs classifier
         # enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
@@ -282,58 +443,43 @@ class EEGNet(nn.Module):
         #     # betas=(beta_1, beta_2)
         # )
 
-        for epoch in range(1, epochs + 1):
-            # total_mse = 0.0
-            total_cls_loss = 0.0
+        for epoch in range(start_epoch, epochs + 1):
+            train_metrics = self.train_pass(epoch)
+            val_metrics = self.validation_pass()
 
-            progress_bar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=True)
-            for batch in progress_bar:
-                epochs = batch[0]
-                one_hot_encoding = batch[1]
-                
-                for i in range(len(epochs)):
-                    X, y = epochs[i], one_hot_encoding[i]
-                    X = X.unsqueeze(0).to(self.device)
-                    y = y.unsqueeze(0).to(torch.float32).to(self.device)
-                    # image_embed = embeds.unsqueeze(0).to(device)
+            log_object = { "epoch": epoch }
+            summary_str = f"Epoch {epoch}/{epochs}, "
 
-                    logits = self(X)
-                    # print(logits.dtype)
-                    # print(y.dtype)
-
-                    # # Training Encoder
-                    # for param in classifier_params:
-                    #     param.requires_grad = False
-
-                    # optimizer_encoder.zero_grad()
-                    # embed_loss = mse_loss_fn(clip_embed, image_embed)
-                    # embed_loss.backward()
-                    # optimizer_encoder.step()
-
-                    # Training Classifier
-                    # for param in enc_params:
-                        # param.requires_grad = True
-
-                    # for param in classifier_params:
-                    #     param.requires_grad = True
-
-                    optimizer.zero_grad()
-                    cls_loss = bce_loss_fn(logits, y)
-                    cls_loss.backward()
-                    optimizer.step()
-
-                    # # Reset all Params
-                    # for params in self.parameters():
-                    #     params.requires_grad = True
-
-                    total_cls_loss += cls_loss.item()
-                    # total_mse += embed_loss.item()
+            for k, v in train_metrics.items():
+                key = f'train_{k}'
+                log_object[key] = v
+                history[key].append(v)
+                summary_str += f'{key}: {v:.4f}'
             
-            # avg_mse = total_mse / len(generator.batch_size)
-            avg_cls_loss = total_cls_loss / len(loader.batch_size)
+            for k, v in val_metrics.items():
+                key = f'val_{k}'
+                log_object[key] = v
+                history[key].append(v)
+                summary_str += f'{key}: {v:.4f}'
+            
+            wandb.log(log_object)
+            print(summary_str)
 
-            print(f'Epoch {epoch}: Classification Loss: {avg_cls_loss:.4f}')
+            avg_val_loss = log_object['val_loss']
+            if avg_val_loss < self.best_val_loss:
+                self.best_val_loss = avg_val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': avg_val_loss,
+                }, checkpoint_path)
+                print(f"Saved best model checkpoint to {checkpoint_path}")
+                wandb.save(checkpoint_path, policy='now')
+        
+        return history
 
+            
 
 
 
