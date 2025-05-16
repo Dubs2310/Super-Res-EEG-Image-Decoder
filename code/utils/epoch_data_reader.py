@@ -193,6 +193,29 @@ class EpochDataReader(Dataset):
         else:
             self.indices = self.all_indices
 
+    # This function updates the group name so that the __getitem__ method reads from the new group name (ground-truth or super-resolution)
+    def read_from_super_resolution(self, identifier=''):
+        if self.read_from == "super-resolution":
+            return
+        if not identifier:
+            print('No super resolution identifier provided')
+            return
+        group_parts = self.group_name.split('/')
+        self.read_from = "super-resolution"
+        group_parts[1] = self.read_from
+        group_parts.append(identifier)
+        self.group_name = '/'.join(group_parts)
+
+    # This function updates the group name so that the __getitem__ method reads from the new group name (ground-truth or super-resolution)
+    def read_from_ground_truth(self):
+        if self.read_from == "ground-truth":
+            return
+        group_parts = self.group_name.split('/')
+        self.read_from = "ground-truth"
+        group_parts[1] = self.read_from
+        group_parts.pop() # remove the identifier when it was reading from super resolution
+        self.group_name = '/'.join(group_parts)
+
     def __len__(self):
         return len(self.indices)
 
@@ -215,3 +238,114 @@ class EpochDataReader(Dataset):
                 return epoch_data, one_hot
             else:
                 return epoch_data
+
+    def push_super_resolution_to_dataset(self, item, identifier):
+        """
+        Push super-resolution epoch data and optional one-hot-encoding to the h5 dataset.
+        
+        Parameters:
+        -----------
+        item : tuple
+            Tuple containing (epoch_data, one_hot_encoding) where one_hot_encoding can be None
+        identifier : str
+            Identifier to append to the group name
+        """
+        # Unpack the item
+        epoch_data, one_hot = item
+        
+        # Compute new group name for super-resolution
+        group_parts = self.group_name.split('/')
+        group_parts[1] = "super-resolution"
+        group_parts.append(identifier)
+        sr_group_name = '/'.join(group_parts)
+        
+        with h5py.File(self.h5_path, 'a') as f:
+            # Check if super-resolution group exists
+            create_datasets = False
+            try:
+                group = f[sr_group_name]
+                current_size = group['epochs'].shape[0]
+            except (KeyError, ValueError):
+                # Group doesn't exist, create it
+                create_datasets = True
+                f.create_group(sr_group_name)
+                current_size = 0
+            
+            # If datasets don't exist, create them with same shape as ground-truth
+            if create_datasets:
+                # Get shape from the original data
+                with h5py.File(self.h5_path, 'r') as f_read:
+                    original_group = group_parts.copy()
+                    original_group[1] = "ground-truth"
+                    original_group = '/'.join(original_group[:len(original_group)-1])  # Remove identifier
+                    
+                    # Get shapes from original datasets
+                    channels, timesteps = f_read[f"{original_group}/epochs"].shape[1:]
+                    
+                    # Create epochs dataset
+                    f.create_dataset(
+                        f"{sr_group_name}/epochs",
+                        shape=(0, channels, timesteps),
+                        maxshape=(None, channels, timesteps),
+                        dtype=np.float32
+                    )
+                    
+                    # Create one-hot-encodings dataset if needed
+                    if one_hot is not None and f"{original_group}/one-hot-encodings" in f_read:
+                        num_categories = f_read[f"{original_group}/one-hot-encodings"].shape[1]
+                        f.create_dataset(
+                            f"{sr_group_name}/one-hot-encodings",
+                            shape=(0, num_categories),
+                            maxshape=(None, num_categories),
+                            dtype=np.float32
+                        )
+            
+            # Add epoch data
+            epochs_dset = f[f"{sr_group_name}/epochs"]
+            new_size = current_size + epoch_data.shape[0]
+            epochs_dset.resize(new_size, axis=0)
+            epochs_dset[current_size:new_size] = epoch_data
+            
+            # Add one-hot encoding if provided
+            if one_hot is not None and f"{sr_group_name}/one-hot-encodings" in f:
+                ohe_dset = f[f"{sr_group_name}/one-hot-encodings"]
+                ohe_dset.resize(new_size, axis=0)
+                ohe_dset[current_size:new_size] = one_hot
+        
+    def has_super_res(self, identifier):
+        """
+        Check if super-resolution data with the specified identifier exists.
+        
+        Parameters:
+        -----------
+        identifier : str
+            Identifier appended to the super-resolution group name
+        
+        Returns:
+        --------
+        bool
+            True if the super-resolution dataset exists, False otherwise
+        """
+        # Compute the super-resolution group name
+        group_parts = self.group_name.split('/')
+        
+        # If currently reading from super-resolution, handle it
+        if group_parts[1] == "super-resolution":
+            # Make a copy to avoid altering the current group_name
+            group_parts = group_parts.copy()
+            # If the current group has an identifier, remove it
+            if len(group_parts) > 7:  # Standard group has 7 parts
+                group_parts.pop()
+        
+        # Set to super-resolution and add the identifier
+        group_parts[1] = "super-resolution"
+        group_parts.append(identifier)
+        sr_group_name = '/'.join(group_parts)
+        
+        # Check if the group exists in the h5 file
+        try:
+            with h5py.File(self.h5_path, 'r') as f:
+                return sr_group_name in f and 'epochs' in f[sr_group_name]
+        except Exception as e:
+            print(f"Error checking for super-resolution dataset: {str(e)}")
+            return False

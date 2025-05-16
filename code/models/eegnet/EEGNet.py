@@ -366,7 +366,7 @@ class EEGNet(nn.Module):
                     logits = self(X)
 
                     loss = bce_loss_fn(logits, y)
-                    batch_losses.append(loss)
+                    batch_losses.append(loss.item())
                     batch_logits.append(torch.sigmoid(logits).detach().cpu())
                 
                 val_losses.append(np.mean(batch_losses))
