@@ -6,7 +6,7 @@ import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 from torch.nn.functional import elu
-import pytorch_lightning as pl
+# import pytorch_lightning as pl
 from sklearn.metrics import accuracy_score
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", '..'))
@@ -130,41 +130,185 @@ class Ensure4d(nn.Module):
         return x
     
 
+# class EEGNet(nn.Module):
+#     def __init__(self, device, lr = 1e-3, one_cycle_lr = True, weight_decay = 0.0, epochs = 100, in_chans = 8, n_classes = 20, final_conv_length = "auto", input_window_samples = None, F1 = 8, D = 2, kernel_length = 64, pool_mode = "mean", drop_prob = 0.25, momentum = 0.01, **kwargs):
+#         super().__init__()
+#         self.device = device
+#         if final_conv_length == "auto":
+#             assert input_window_samples is not None
+#         self.in_chans = in_chans
+#         self.n_classes = n_classes
+#         self.input_window_samples = input_window_samples
+#         self.final_conv_length = final_conv_length
+#         self.pool_mode = pool_mode
+#         self.F1 = F1
+#         self.D = D
+#         self.F2 = D*F1
+#         self.kernel_length = kernel_length
+#         self.drop_prob = drop_prob
+#         self.momentum = momentum
+#         self.one_cycle_lr = one_cycle_lr
+#         self.lr = lr
+#         self.weight_decay = weight_decay
+#         pool_class = dict(max=nn.MaxPool2d, mean=nn.AvgPool2d)[self.pool_mode]
+#         self.loss = nn.NLLLoss() #EEGNet uses a log softmax layer. Therefore, using a NLLLoss() equates to CrossEntropyLoss()
+#         self.epochs = epochs
+
+#         self.ensuredims = Ensure4d() # from [b c t] to [b c t 1]
+#         self.dimshuffle = Expression(_transpose_to_b_1_c_0) # from [b c t 1] to [b 1 c t] --> first conv over temporal dim with kernel_length
+#         self.conv_temporal = nn.Conv2d(
+#             in_channels = 1,
+#             out_channels = self.F1,
+#             kernel_size = (1, self.kernel_length),
+#             stride = 1,
+#             bias = False,
+#             padding = (0, self.kernel_length // 2),
+#             )
+#         self.bnorm_temporal = nn.BatchNorm2d(self.F1, momentum=0.01, affine=True, eps=1e-3)
+#         self.conv_spatial = Conv2dWithConstraint(
+#             self.F1,
+#             self.F1 * self.D,
+#             (self.in_chans, 1),
+#             max_norm=1,
+#             stride=1,
+#             bias=False,
+#             groups=self.F1,
+#             padding=(0, 0),
+#             )
+#         self.bnorm_1 = nn.BatchNorm2d(self.F1 * self.D, momentum=self.momentum, affine=True, eps=1e-3)
+#         self.elu_1 = Expression(elu)
+#         self.pool_1 = pool_class(kernel_size=(1, 4), stride=(1, 4))
+#         self.drop_1 = nn.Dropout(p=self.drop_prob)
+#         self.conv_separable_depth = nn.Conv2d(
+#             self.F1 * self.D,
+#             self.F1 * self.D,
+#             (1, 16),
+#             stride=1,
+#             bias=False,
+#             groups=self.F1 * self.D,
+#             padding=(0, 16 // 2),
+#             )
+#         self.conv_separable_point = nn.Conv2d(
+#             self.F1 * self.D,
+#             self.F2,
+#             (1, 1),
+#             stride=1,
+#             bias=False,
+#             padding=(0, 0),
+#             )
+#         self.bnorm_2 = nn.BatchNorm2d(self.F2, momentum=self.momentum, affine=True, eps=1e-3)
+#         self.elu_2 = Expression(elu)
+#         self.pool_2 = pool_class(kernel_size=(1, 8), stride=(1, 8))
+#         self.drop_2 = nn.Dropout(p=self.drop_prob)
+
+#         #The following tests the output dimensions to pass the right dimensions to the classifier head
+#         out = self.partial_forward(
+#                 torch.ones(
+#                 (1, self.in_chans, self.input_window_samples, 1),
+#                 dtype=torch.float32
+#                 )
+#             )
+#         n_out_virtual_chans = out.cpu().data.numpy().shape[2]
+#         if self.final_conv_length == "auto":
+#             n_out_time = out.cpu().data.numpy().shape[3]
+#             self.final_conv_length = n_out_time
+#         self.conv_classifier = nn.Conv2d(
+#             self.F2,
+#             self.n_classes,
+#             (n_out_virtual_chans, self.final_conv_length),
+#             bias=True,
+#             )
+#         self.softmax = nn.LogSoftmax(dim=1)
+#         # Transpose time back in third dimension (axis=2)
+#         self.permute_back = Expression(_transpose_1_0)
+#         self.squeeze = Expression(squeeze_final_output)
+#         _glorot_weight_zero_bias(self) #Initialize weights
+
+#     def partial_forward(self, x): #for a sample of [1 8 500] and kernel_size=128
+#         #Used to initially determine the input dimensions to the classifier head
+#         x = self.ensuredims(x) # [1 8 500 1]
+#         x = self.dimshuffle(x) # [1 1 8 500]
+#         x = self.conv_temporal(x) # [1 8 8 501]
+#         x = self.bnorm_temporal(x) # [1 8 8 501]
+#         x = self.elu_1(x) # [1 8 8 501]
+#         x = self.conv_spatial(x) # [1 16 1 501]
+#         x = self.bnorm_1(x) # [1 16 1 501]
+#         x = self.elu_1(x) # [1 16 1 501]
+#         x = self.pool_1(x) # [1 16 1 125]
+#         x = self.drop_1(x) # [1 16 1 125]
+#         x = self.conv_separable_depth(x) # [1 16 1 126]
+#         x = self.conv_separable_point(x) # [1 16 1 126]
+#         x = self.bnorm_2(x) # [1 16 1 126]
+#         x = self.elu_2(x) # [1 16 1 126]
+#         x = self.pool_2(x) # [1 16 1 15]
+#         x = self.drop_2(x) # [1 16 1 15]
+#         return x
+    
+#     def forward(self, x):
+#         x = self.partial_forward(x) # [1 16 1 15] #outputs bs x F2 x 1 x 15 (128*15)
+#         x = self.conv_classifier(x) # [1 20 1 1] 
+#         x = self.softmax(x) # [1 20 1 1]
+#         x = self.permute_back(x) # [1 20 1 1]
+#         x = self.squeeze(x) # [1 20]
+#         return x
+    
+#     def configure_optimizers(self):
+#         optimizer = torch.optim.Adam(params = self.parameters(), lr = self.lr, weight_decay = self.weight_decay)
+#         if self.one_cycle_lr:
+#             one_cycle = torch.optim.lr_scheduler.OneCycleLR(
+#                 optimizer = optimizer,
+#                 max_lr = self.lr,
+#                 total_steps = len(self.trainer.datamodule.train_dataloader()) * self.epochs,
+#                 # epochs = self.epochs,
+#                 # steps_per_epoch = self.trainer.estimated_stepping_batches // self.epochs,
+#                 cycle_momentum = True
+#             )
+#             lr_scheduler = {
+#                 "scheduler": one_cycle, #lr
+#                 "interval": "step",
+#                 "name": "Learning Rate Scheduling"
+#             }
+#             return [optimizer], [lr_scheduler]
+#         else:
+#             return [optimizer]
+        
 class EEGNet(nn.Module):
-    def __init__(self, device, lr = 1e-3, one_cycle_lr = True, weight_decay = 0.0, epochs = 100, in_chans = 8, n_classes = 20, final_conv_length = "auto", input_window_samples = None, F1 = 8, D = 2, kernel_length = 64, pool_mode = "mean", drop_prob = 0.25, momentum = 0.01, **kwargs):
+    def __init__(self, 
+                 device,
+                 in_chans, time_steps, n_classes, 
+                 final_conv_length='auto', F1=8, D=2, F2=16, 
+                 kernel_length=64, drop_prob=0.5,
+                 pool_class=nn.AvgPool2d, momentum=0.1
+                 ):
         super().__init__()
         self.device = device
-        if final_conv_length == "auto":
-            assert input_window_samples is not None
         self.in_chans = in_chans
+        self.time_steps = time_steps
         self.n_classes = n_classes
-        self.input_window_samples = input_window_samples
         self.final_conv_length = final_conv_length
-        self.pool_mode = pool_mode
         self.F1 = F1
         self.D = D
-        self.F2 = D*F1
+        self.F2 = F2
         self.kernel_length = kernel_length
         self.drop_prob = drop_prob
         self.momentum = momentum
-        self.one_cycle_lr = one_cycle_lr
-        self.lr = lr
-        self.weight_decay = weight_decay
-        pool_class = dict(max=nn.MaxPool2d, mean=nn.AvgPool2d)[self.pool_mode]
-        self.loss = nn.NLLLoss() #EEGNet uses a log softmax layer. Therefore, using a NLLLoss() equates to CrossEntropyLoss()
-        self.epochs = epochs
 
-        self.ensuredims = Ensure4d() # from [b c t] to [b c t 1]
-        self.dimshuffle = Expression(_transpose_to_b_1_c_0) # from [b c t 1] to [b 1 c t] --> first conv over temporal dim with kernel_length
+        # Input Transformation
+        self.ensuredims = Ensure4d()
+        self.dimshuffle = Expression(_transpose_to_b_1_c_0)
+
+        # Temporal convolution
         self.conv_temporal = nn.Conv2d(
-            in_channels = 1,
-            out_channels = self.F1,
-            kernel_size = (1, self.kernel_length),
-            stride = 1,
-            bias = False,
-            padding = (0, self.kernel_length // 2),
-            )
+            in_channels=1,
+            out_channels=self.F1,
+            kernel_size=(1, self.kernel_length),
+            stride=1,
+            bias=False,
+            padding=(0, self.kernel_length // 2)
+        )
         self.bnorm_temporal = nn.BatchNorm2d(self.F1, momentum=0.01, affine=True, eps=1e-3)
+
+        # Spatial convolution
         self.conv_spatial = Conv2dWithConstraint(
             self.F1,
             self.F1 * self.D,
@@ -173,38 +317,40 @@ class EEGNet(nn.Module):
             stride=1,
             bias=False,
             groups=self.F1,
-            padding=(0, 0),
-            )
+            padding=(0, 0)
+        )
         self.bnorm_1 = nn.BatchNorm2d(self.F1 * self.D, momentum=self.momentum, affine=True, eps=1e-3)
         self.elu_1 = Expression(elu)
-        self.pool_1 = pool_class(kernel_size=(1, 4), stride=(1, 4))
+        self.pool_1 = pool_class(kernel_size=(1,4), stride=(1,4))
         self.drop_1 = nn.Dropout(p=self.drop_prob)
-        self.conv_separable_depth = nn.Conv2d(
+
+        # Separable convolution
+        self.conv_separable_dept = nn.Conv2d(
             self.F1 * self.D,
             self.F1 * self.D,
             (1, 16),
             stride=1,
             bias=False,
             groups=self.F1 * self.D,
-            padding=(0, 16 // 2),
-            )
+            padding=(0,8)
+        )
         self.conv_separable_point = nn.Conv2d(
             self.F1 * self.D,
             self.F2,
             (1, 1),
             stride=1,
             bias=False,
-            padding=(0, 0),
-            )
+            padding=(0, 0)
+        )
         self.bnorm_2 = nn.BatchNorm2d(self.F2, momentum=self.momentum, affine=True, eps=1e-3)
         self.elu_2 = Expression(elu)
-        self.pool_2 = pool_class(kernel_size=(1, 8), stride=(1, 8))
+        self.pool_2 = pool_class(kernel_size=(1, 8), stride=(1,8))
         self.drop_2 = nn.Dropout(p=self.drop_prob)
 
         #The following tests the output dimensions to pass the right dimensions to the classifier head
-        out = self.partial_forward(
+        out = self._feature_forward(
                 torch.ones(
-                (1, self.in_chans, self.input_window_samples, 1),
+                (1, self.in_chans, self.time_steps, 1),
                 dtype=torch.float32
                 )
             )
@@ -218,410 +364,314 @@ class EEGNet(nn.Module):
             (n_out_virtual_chans, self.final_conv_length),
             bias=True,
             )
-        self.softmax = nn.LogSoftmax(dim=1)
+        # self.softmax = nn.LogSoftmax(dim=1)
+        self.sigmoid = nn.Sigmoid()
         # Transpose time back in third dimension (axis=2)
         self.permute_back = Expression(_transpose_1_0)
         self.squeeze = Expression(squeeze_final_output)
         _glorot_weight_zero_bias(self) #Initialize weights
 
-    def partial_forward(self, x): #for a sample of [1 8 500] and kernel_size=128
-        #Used to initially determine the input dimensions to the classifier head
-        x = self.ensuredims(x) # [1 8 500 1]
-        x = self.dimshuffle(x) # [1 1 8 500]
-        x = self.conv_temporal(x) # [1 8 8 501]
-        x = self.bnorm_temporal(x) # [1 8 8 501]
-        x = self.elu_1(x) # [1 8 8 501]
-        x = self.conv_spatial(x) # [1 16 1 501]
-        x = self.bnorm_1(x) # [1 16 1 501]
-        x = self.elu_1(x) # [1 16 1 501]
-        x = self.pool_1(x) # [1 16 1 125]
-        x = self.drop_1(x) # [1 16 1 125]
-        x = self.conv_separable_depth(x) # [1 16 1 126]
-        x = self.conv_separable_point(x) # [1 16 1 126]
-        x = self.bnorm_2(x) # [1 16 1 126]
-        x = self.elu_2(x) # [1 16 1 126]
-        x = self.pool_2(x) # [1 16 1 15]
-        x = self.drop_2(x) # [1 16 1 15]
+        # with torch.no_grad():
+        #     dumy = torch.ones((1, self.in_chans, self.time_steps, 1), dtype=torch.float32)
+        #     out = self._feature_forward(dumy)
+        
+        # n_out_virtual_chans = out.shape[2]
+        # n_out_time = out.shape[3]
+        # self.final_conv_length = n_out_time if final_conv_length == 'auto' else final_conv_length
+
+        # # self.flat_dim = self.F2 * n_out_time
+
+        # # # Embedding Layer 
+        # # self.flatten = nn.Flatten()
+        # # self.eeg_to_clip = nn.Linear(self.flat_dim, 512)
+
+        # # # Classifier
+        # # self.classifier = nn.Linear(512, self.n_classes)
+        
+        # # _glorot_weight_zero_bias(self)
+
+        # self.conv_classifier = nn.Conv2d(
+        #     self.F2,
+        #     self.n_classes,
+        #     (n_out_virtual_chans, self.final_conv_length),
+        #     bias=True,
+        #     )
+        # self.softmax = nn.LogSoftmax(dim=1)
+        # # Transpose time back in third dimension (axis=2)
+        # self.permute_back = Expression(_transpose_1_0)
+        # self.squeeze = Expression(squeeze_final_output)
+        # _glorot_weight_zero_bias(self) #Initialize weights
+        self.to(device)
+
+    def _feature_forward(self, x):
+        x = self.ensuredims(x)
+        x = self.dimshuffle(x)
+
+        x = self.conv_temporal(x)
+        x = self.bnorm_temporal(x)
+        
+        x = self.conv_spatial(x)
+        x = self.bnorm_1(x)
+        x = self.elu_1(x)
+        x = self.pool_1(x)
+        x = self.drop_1(x)
+
+        x = self.conv_separable_dept(x)
+        x = self.conv_separable_point(x)
+        x = self.bnorm_2(x)
+        x = self.elu_2(x)
+        x = self.pool_2(x)
+        x = self.drop_2(x)
+
         return x
     
     def forward(self, x):
-        x = self.partial_forward(x) # [1 16 1 15] #outputs bs x F2 x 1 x 15 (128*15)
+        x = self._feature_forward(x)
+        # x = self.flatten(x.contiguous())
+        # clip_embed = self.eeg_to_clip(x)
+        # logits = self.classifier(clip_embed)
         x = self.conv_classifier(x) # [1 20 1 1] 
-        x = self.softmax(x) # [1 20 1 1]
+        # x = self.sigmoid(x) # [1 20 1 1]
         x = self.permute_back(x) # [1 20 1 1]
         x = self.squeeze(x) # [1 20]
         return x
+
+        # return logits
     
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(params = self.parameters(), lr = self.lr, weight_decay = self.weight_decay)
-        if self.one_cycle_lr:
-            one_cycle = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer = optimizer,
-                max_lr = self.lr,
-                total_steps = len(self.trainer.datamodule.train_dataloader()) * self.epochs,
-                # epochs = self.epochs,
-                # steps_per_epoch = self.trainer.estimated_stepping_batches // self.epochs,
-                cycle_momentum = True
+    def predict(self, x):
+        self.eval()
+        with torch.no_grad():
+            # x = self._feature_forward(x)
+            # x = self.flatten(x)
+            # clip_embed = self.eeg_to_clip(x)
+            # logits = self.classifier(clip_embed)
+            # probs = torch.sigmoid(logits)
+            # probs = probs.detach().cpu().numpy() 
+            # preds = (probs > 0.5).astype(int)
+            probs = self(x)
+            # probs = torch.sigmoid(logits)
+            probs = self.sigmoid(probs) # [1 20 1 1]
+            # probs = self.permute_back(probs) # [1 20 1 1]
+            # probs = self.squeeze(probs) # [1 20]
+            probs = probs.detach().cpu().numpy() 
+            preds = (probs > 0.5).astype(int)
+            return preds
+    
+    def train_pass(self, epoch):
+        self.train()
+        self.loader.dataset.set_split_type('train')
+
+        # mse_loss_fn = nn.MSELoss()
+        bce_loss_fn = nn.BCEWithLogitsLoss()
+        # ce_loss_fn = nn.NLLLoss()
+
+        train_losses = []
+        train_accuracies = []
+
+        progress_bar = tqdm(self.loader, desc=f"Epoch {epoch}/{self.epochs}", leave=True)
+        for batch in progress_bar:
+            epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
+            one_hot_encoding = batch[1]
+            batch_losses = []
+            batch_logits = []
+            
+            for i in range(len(epochs)):
+                X, y = epochs[i], one_hot_encoding[i]
+                X = X.unsqueeze(0).to(self.device)
+                y = y.unsqueeze(0).to(torch.float32).to(self.device)
+                # image_embed = embeds.unsqueeze(0).to(device)
+
+                logits = self(X)
+                # print(logits.dtype)
+                # print(y.dtype)
+
+                # # Training Encoder
+                # for param in classifier_params:
+                #     param.requires_grad = False
+
+                # optimizer_encoder.zero_grad()
+                # embed_loss = mse_loss_fn(clip_embed, image_embed)
+                # embed_loss.backward()
+                # optimizer_encoder.step()
+
+                # Training Classifier
+                # for param in enc_params:
+                    # param.requires_grad = True
+
+                # for param in classifier_params:
+                #     param.requires_grad = True
+
+                self.optimizer.zero_grad()
+                cls_loss = bce_loss_fn(logits, y)
+                cls_loss.backward()
+                self.optimizer.step()
+
+                # # Reset all Params
+                # for params in self.parameters():
+                #     params.requires_grad = True
+
+                batch_losses.append(cls_loss.item())
+                batch_logits.append(self.sigmoid(logits).detach().cpu())
+                # total_mse += embed_loss.item()
+            
+            train_losses.append(np.mean(batch_losses))
+            
+            logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
+            preds = (logits_array > 0.5).astype(int)
+            train_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
+
+            progress_bar.set_postfix(
+                loss=f"{train_losses[-1]:.4f}",
+                acc=f"{train_accuracies[-1]:.4f}"
             )
-            lr_scheduler = {
-                "scheduler": one_cycle, #lr
-                "interval": "step",
-                "name": "Learning Rate Scheduling"
-            }
-            return [optimizer], [lr_scheduler]
-        else:
-            return [optimizer]
         
-# class EEGNet(nn.Module):
-#     def __init__(self, 
-#                  device,
-#                  in_chans, time_steps, n_classes, 
-#                  final_conv_length='auto', F1=8, D=2, F2=16, 
-#                  kernel_length=64, drop_prob=0.5,
-#                  pool_class=nn.AvgPool2d, momentum=0.1
-#                  ):
-#         super().__init__()
-#         self.device = device
-#         self.in_chans = in_chans
-#         self.time_steps = time_steps
-#         self.n_classes = n_classes
-#         self.final_conv_length = final_conv_length
-#         self.F1 = F1
-#         self.D = D
-#         self.F2 = F2
-#         self.kernel_length = kernel_length
-#         self.drop_prob = drop_prob
-#         self.momentum = momentum
+        # avg_mse = total_mse / len(generator.batch_size)
+        avg_cls_loss = np.mean(train_losses)
+        avg_cls_acc = np.mean(train_accuracies)
 
-#         # Input Transformation
-#         self.ensuredims = Ensure4d()
-#         self.dimshuffle = Expression(_transpose_to_b_1_c_0)
+        return {
+           'loss': avg_cls_loss,
+           'acc': avg_cls_acc
+        }
 
-#         # Temporal convolution
-#         self.conv_temporal = nn.Conv2d(
-#             in_channels=1,
-#             out_channels=self.F1,
-#             kernel_size=(1, self.kernel_length),
-#             stride=1,
-#             bias=False,
-#             padding=(0, self.kernel_length // 2)
-#         )
-#         self.bnorm_temporal = nn.BatchNorm2d(self.F1, momentum=0.01, affine=True, eps=1e-3)
+    def validation_pass(self):
+        self.eval()
+        self.loader.dataset.set_split_type('val')
 
-#         # Spatial convolution
-#         self.conv_spatial = Conv2dWithConstraint(
-#             self.F1,
-#             self.F1 * self.D,
-#             (self.in_chans, 1),
-#             max_norm=1,
-#             stride=1,
-#             bias=False,
-#             groups=self.F1,
-#             padding=(0, 0)
-#         )
-#         self.bnorm_1 = nn.BatchNorm2d(self.F1 * self.D, momentum=self.momentum, affine=True, eps=1e-3)
-#         self.elu_1 = Expression(elu)
-#         self.pool_1 = pool_class(kernel_size=(1,4), stride=(1,4))
-#         self.drop_1 = nn.Dropout(p=self.drop_prob)
+        bce_loss_fn = nn.BCEWithLogitsLoss()
+        # ce_loss_fn = nn.NLLLoss()
 
-#         # Separable convolution
-#         self.conv_separable_dept = nn.Conv2d(
-#             self.F1 * self.D,
-#             self.F1 * self.D,
-#             (1, 16),
-#             stride=1,
-#             bias=False,
-#             groups=self.F1 * self.D,
-#             padding=(0,8)
-#         )
-#         self.conv_separable_point = nn.Conv2d(
-#             self.F1 * self.D,
-#             self.F2,
-#             (1, 1),
-#             stride=1,
-#             bias=False,
-#             padding=(0, 0)
-#         )
-#         self.bnorm_2 = nn.BatchNorm2d(self.F2, momentum=self.momentum, affine=True, eps=1e-3)
-#         self.elu_2 = Expression(elu)
-#         self.pool_2 = pool_class(kernel_size=(1, 8), stride=(1,8))
-#         self.drop_2 = nn.Dropout(p=self.drop_prob)
+        val_losses = []
+        val_accuracies = []
 
-#         with torch.no_grad():
-#             dumy = torch.ones((1, self.in_chans, self.time_steps, 1), dtype=torch.float32)
-#             out = self._feature_forward(dumy)
-        
-#         n_out_virtual_chans = out.shape[2]
-#         n_out_time = out.shape[3]
-#         self.final_conv_length = n_out_time if final_conv_length == 'auto' else final_conv_length
+        with torch.no_grad():
+            progress_bar = tqdm(self.loader, desc="Running model on validation set...", leave=False)
+            for batch in progress_bar:
+                epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
+                one_hot_encoding = batch[1]
+                batch_losses = []
+                batch_logits = []
 
-#         self.flat_dim = self.F2 * n_out_time
+                for i in range(len(epochs)):
+                    X, y = epochs[i], one_hot_encoding[i]
+                    X = X.unsqueeze(0).to(self.device)
+                    y = y.unsqueeze(0).to(torch.float32).to(self.device)
 
-#         # Embedding Layer 
-#         self.flatten = nn.Flatten()
-#         self.eeg_to_clip = nn.Linear(self.flat_dim, 512)
+                    logits = self(X)
 
-#         # Classifier
-#         self.classifier = nn.Linear(512, self.n_classes)
-        
-#         _glorot_weight_zero_bias(self)
-#         self.to(device)
-
-#     def _feature_forward(self, x):
-#         x = self.ensuredims(x)
-#         x = self.dimshuffle(x)
-
-#         x = self.conv_temporal(x)
-#         x = self.bnorm_temporal(x)
-        
-#         x = self.conv_spatial(x)
-#         x = self.bnorm_1(x)
-#         x = self.elu_1(x)
-#         x = self.pool_1(x)
-#         x = self.drop_1(x)
-
-#         x = self.conv_separable_dept(x)
-#         x = self.conv_separable_point(x)
-#         x = self.bnorm_2(x)
-#         x = self.elu_2(x)
-#         x = self.pool_2(x)
-#         x = self.drop_2(x)
-
-#         return x
-    
-#     def forward(self, x):
-#         x = self._feature_forward(x)
-#         x = self.flatten(x.contiguous())
-#         clip_embed = self.eeg_to_clip(x)
-#         logits = self.classifier(clip_embed)
-
-#         return logits
-    
-#     def predict(self, x):
-#         self.eval()
-#         with torch.no_grad():
-#             x = self._feature_forward(x)
-#             x = self.flatten(x)
-#             clip_embed = self.eeg_to_clip(x)
-#             logits = self.classifier(clip_embed)
-#             probs = torch.sigmoid(logits)
-#             probs = probs.detach().cpu().numpy() 
-#             preds = (probs > 0.5).astype(int)
-#         return preds
-    
-#     def train_pass(self, epoch):
-#         self.train()
-#         self.loader.dataset.set_split_type('train')
-
-#         # mse_loss_fn = nn.MSELoss()
-#         bce_loss_fn = nn.BCEWithLogitsLoss()
-
-#         train_losses = []
-#         train_accuracies = []
-
-#         progress_bar = tqdm(self.loader, desc=f"Epoch {epoch}/{self.epochs}", leave=True)
-#         for batch in progress_bar:
-#             epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
-#             one_hot_encoding = batch[1]
-#             batch_losses = []
-#             batch_logits = []
-            
-#             for i in range(len(epochs)):
-#                 X, y = epochs[i], one_hot_encoding[i]
-#                 X = X.unsqueeze(0).to(self.device)
-#                 y = y.unsqueeze(0).to(torch.float32).to(self.device)
-#                 # image_embed = embeds.unsqueeze(0).to(device)
-
-#                 logits = self(X)
-#                 # print(logits.dtype)
-#                 # print(y.dtype)
-
-#                 # # Training Encoder
-#                 # for param in classifier_params:
-#                 #     param.requires_grad = False
-
-#                 # optimizer_encoder.zero_grad()
-#                 # embed_loss = mse_loss_fn(clip_embed, image_embed)
-#                 # embed_loss.backward()
-#                 # optimizer_encoder.step()
-
-#                 # Training Classifier
-#                 # for param in enc_params:
-#                     # param.requires_grad = True
-
-#                 # for param in classifier_params:
-#                 #     param.requires_grad = True
-
-#                 self.optimizer.zero_grad()
-#                 cls_loss = bce_loss_fn(logits, y)
-#                 cls_loss.backward()
-#                 self.optimizer.step()
-
-#                 # # Reset all Params
-#                 # for params in self.parameters():
-#                 #     params.requires_grad = True
-
-#                 batch_losses.append(cls_loss.item())
-#                 batch_logits.append(torch.sigmoid(logits).detach().cpu())
-#                 # total_mse += embed_loss.item()
-            
-#             train_losses.append(np.mean(batch_losses))
-            
-#             logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
-#             preds = (logits_array > 0.5).astype(int)
-#             train_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
-
-#             progress_bar.set_postfix(
-#                 loss=f"{train_losses[-1]:.4f}",
-#                 acc=f"{train_accuracies[-1]:.4f}"
-#             )
-        
-#         # avg_mse = total_mse / len(generator.batch_size)
-#         avg_cls_loss = np.mean(train_losses)
-#         avg_cls_acc = np.mean(train_accuracies)
-
-#         return {
-#            'loss': avg_cls_loss,
-#            'acc': avg_cls_acc
-#         }
-
-#     def validation_pass(self):
-#         self.eval()
-#         self.loader.dataset.set_split_type('val')
-
-#         bce_loss_fn = nn.BCEWithLogitsLoss()
-
-#         val_losses = []
-#         val_accuracies = []
-
-#         with torch.no_grad():
-#             progress_bar = tqdm(self.loader, desc="Running model on validation set...", leave=False)
-#             for batch in progress_bar:
-#                 epochs = batch[0] # Local variable epochs here is all the Xs, not changing the name from before
-#                 one_hot_encoding = batch[1]
-#                 batch_losses = []
-#                 batch_logits = []
-
-#                 for i in range(len(epochs)):
-#                     X, y = epochs[i], one_hot_encoding[i]
-#                     X = X.unsqueeze(0).to(self.device)
-#                     y = y.unsqueeze(0).to(torch.float32).to(self.device)
-
-#                     logits = self(X)
-
-#                     loss = bce_loss_fn(logits, y)
-#                     batch_losses.append(loss.item())
-#                     batch_logits.append(torch.sigmoid(logits).detach().cpu())
+                    loss = bce_loss_fn(logits, y)
+                    batch_losses.append(loss.item())
+                    batch_logits.append(torch.sigmoid(logits).detach().cpu())
                 
-#                 val_losses.append(np.mean(batch_losses))
+                val_losses.append(np.mean(batch_losses))
 
-#                 logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
-#                 preds = (logits_array > 0.5).astype(int)
-#                 val_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
+                logits_array = torch.cat(batch_logits, dim=0).numpy()  # shape: (batch_size, num_classes)
+                preds = (logits_array > 0.5).astype(int)
+                val_accuracies.append(accuracy_score(one_hot_encoding.flatten(), preds.flatten()))
             
-#         avg_val_loss = np.mean(val_losses)
-#         avg_val_acc = np.mean(val_accuracies)
+        avg_val_loss = np.mean(val_losses)
+        avg_val_acc = np.mean(val_accuracies)
 
-#         return {
-#            'loss': avg_val_loss,
-#            'acc': avg_val_acc
-#         }
+        return {
+           'loss': avg_val_loss,
+           'acc': avg_val_acc
+        }
 
 
     
-#     def fit(self, loader, epochs, optimizer, checkpoint_dir, identifier, use_checkpoint=False): #lr=1e-4, 
-#         """
-#             X is zip(metadata, eeg)
-#         """
-#         os.makedirs(checkpoint_dir, exist_ok=True)
-#         self.epochs = epochs
-#         self.optimizer = optimizer
-#         self.loader = loader
-#         start_epoch = 1
+    def fit(self, loader, epochs, optimizer, checkpoint_dir, identifier, use_checkpoint=False): #lr=1e-4, 
+        """
+            X is zip(metadata, eeg)
+        """
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        self.epochs = epochs
+        self.optimizer = optimizer
+        self.loader = loader
+        start_epoch = 1
 
-#         metrics = ['loss', 'acc']
-#         history = {}
+        metrics = ['loss', 'acc']
+        history = {}
 
-#         for m in metrics:
-#             history[f'train_{m}'] = []
-#             history[f'val_{m}'] = []
+        for m in metrics:
+            history[f'train_{m}'] = []
+            history[f'val_{m}'] = []
 
-#         checkpoint_path = os.path.join(checkpoint_dir, f'eegnet_{identifier}_best.pt')
-#         if use_checkpoint and os.path.exists(checkpoint_path):
-#             print(f"Loading checkpoint from {checkpoint_path}")
-#             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-#             self.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint_path = os.path.join(checkpoint_dir, f'eegnet_{identifier}_best.pt')
+        if use_checkpoint and os.path.exists(checkpoint_path):
+            print(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            self.load_state_dict(checkpoint['model_state_dict'])
             
-#             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
-#             # Start from the next epoch after the saved one
-#             start_epoch = checkpoint.get('epoch', 0) + 1
+            # Start from the next epoch after the saved one
+            start_epoch = checkpoint.get('epoch', 0) + 1
             
-#             # Restore best validation loss if available
-#             self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+            # Restore best validation loss if available
+            self.best_val_loss = checkpoint.get('val_loss', float('inf'))
             
-#             if start_epoch < self.epochs:
-#                 print(f"Resuming training from epoch {start_epoch}")
+            if start_epoch < self.epochs:
+                print(f"Resuming training from epoch {start_epoch}")
             
-#             # Optionally restore history if saved in checkpoint
-#             if 'history' in checkpoint:
-#                 history = checkpoint['history']
-#         else:
-#             if use_checkpoint:  # Only print if a path was provided but not found
-#                 print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
+            # Optionally restore history if saved in checkpoint
+            if 'history' in checkpoint:
+                history = checkpoint['history']
+        else:
+            if use_checkpoint:  # Only print if a path was provided but not found
+                print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
 
-#         self.best_val_loss = float('inf')
+        self.best_val_loss = float('inf')
 
 
-#         # Parameters for encoder vs classifier
-#         # enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
+        # Parameters for encoder vs classifier
+        # enc_params = [p for name, p in self.named_parameters() if 'classifier' not in name]
 
-#         # optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
-#         # classifier_params = [p for name, p in self.named_parameters()] #if 'classifier' in name]
-#         # optimizer = torch.optim.Adam(classifier_params, lr=lr)
+        # optimizer_encoder = torch.optim.Adam(enc_params, lr=lr)
+        # classifier_params = [p for name, p in self.named_parameters()] #if 'classifier' in name]
+        # optimizer = torch.optim.Adam(classifier_params, lr=lr)
 
-#         # optimizer = torch.optim.Adam(
-#         #     params=[{'params': model.parameters()}], 
-#         #     lr=lr,
-#         #     # weight_decay=weight_decay,
-#         #     # betas=(beta_1, beta_2)
-#         # )
+        # optimizer = torch.optim.Adam(
+        #     params=[{'params': model.parameters()}], 
+        #     lr=lr,
+        #     # weight_decay=weight_decay,
+        #     # betas=(beta_1, beta_2)
+        # )
 
-#         for epoch in range(start_epoch, epochs + 1):
-#             train_metrics = self.train_pass(epoch)
-#             val_metrics = self.validation_pass()
+        for epoch in range(start_epoch, epochs + 1):
+            train_metrics = self.train_pass(epoch)
+            val_metrics = self.validation_pass()
 
-#             log_object = { "epoch": epoch }
-#             summary_str = f"Epoch {epoch}/{epochs}, "
+            log_object = { "epoch": epoch }
+            summary_str = f"Epoch {epoch}/{epochs}, "
 
-#             for k, v in train_metrics.items():
-#                 key = f'train_{k}'
-#                 log_object[key] = v
-#                 history[key].append(v)
-#                 summary_str += f'{key}: {v:.4f}'
+            for k, v in train_metrics.items():
+                key = f'train_{k}'
+                log_object[key] = v
+                history[key].append(v)
+                summary_str += f'{key}: {v:.4f} '
             
-#             for k, v in val_metrics.items():
-#                 key = f'val_{k}'
-#                 log_object[key] = v
-#                 history[key].append(v)
-#                 summary_str += f'{key}: {v:.4f}'
+            for k, v in val_metrics.items():
+                key = f'val_{k}'
+                log_object[key] = v
+                history[key].append(v)
+                summary_str += f'{key}: {v:.4f} '
             
-#             wandb.log(log_object)
-#             print(summary_str)
+            wandb.log(log_object)
+            print(summary_str)
 
-#             avg_val_loss = log_object['val_loss']
-#             if avg_val_loss < self.best_val_loss:
-#                 self.best_val_loss = avg_val_loss
-#                 torch.save({
-#                     'epoch': epoch,
-#                     'model_state_dict': self.state_dict(),
-#                     'optimizer_state_dict': self.optimizer.state_dict(),
-#                     'val_loss': avg_val_loss,
-#                 }, checkpoint_path)
-#                 print(f"Saved best model checkpoint to {checkpoint_path}")
-#                 wandb.save(checkpoint_path, policy='now')
+            avg_val_loss = log_object['val_loss']
+            if avg_val_loss < self.best_val_loss:
+                self.best_val_loss = avg_val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': avg_val_loss,
+                }, checkpoint_path)
+                print(f"Saved best model checkpoint to {checkpoint_path}")
+                wandb.save(checkpoint_path, policy='now')
         
-#         return history
+        return history
 
             
 

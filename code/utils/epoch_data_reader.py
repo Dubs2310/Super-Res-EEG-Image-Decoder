@@ -144,7 +144,7 @@ class EpochDataReader(Dataset):
             epo, ohe = epoch_around_events(self.raw, before, after, channel_names, resample_freq) if epoch_type == 'around_evoked' else epoch_fixed_lengths(self.raw, fixed_length_duration, channel_names, resample_freq)
             
             # Store as numpy arrays directly
-            self.epochs_data = epo.get_data()
+            self.epochs_data = np.array(epo.get_data(), dtype=np.float32)
             self.one_hot_encodings = ohe
             self.epochs_shape = self.epochs_data.shape
             self.has_encodings = (ohe is not None)
