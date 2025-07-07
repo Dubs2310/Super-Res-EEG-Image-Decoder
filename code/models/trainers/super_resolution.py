@@ -1,8 +1,8 @@
 import torch
 import wandb
 import numpy as np
-import pytorch_lightning as pl
 import matplotlib.pyplot as plt
+import pytorch_lightning as pl
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.audio import SignalNoiseRatio
 from models.definers.super_resolution import EEGSuperResolutionDefiner as EEGSuperResolution
@@ -185,7 +185,7 @@ class SuperResolutionPlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"training_loss_curves": wandb.Image(plt)})
         
-        plt.savefig('training_loss_curves.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('training_loss_curves.png', dpi=300, bbox_inches='tight')
         plt.close()
         
         # MAE curves plot
@@ -202,7 +202,7 @@ class SuperResolutionPlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"training_mae_curves": wandb.Image(plt)})
         
-        plt.savefig('training_mae_curves.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('training_mae_curves.png', dpi=300, bbox_inches='tight')
         plt.close()
     
     def _create_test_metrics_plot(self, trainer):
@@ -273,7 +273,7 @@ class SuperResolutionPlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"test_metrics_bar_plot": wandb.Image(fig)})
         
-        plt.savefig('test_metrics_bar_plot.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('test_metrics_bar_plot.png', dpi=300, bbox_inches='tight')
         plt.close()
         
         # Also create a table-style summary
@@ -336,7 +336,7 @@ class SuperResolutionPlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"test_metrics_summary": wandb.Image(fig)})
         
-        plt.savefig('test_metrics_summary.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('test_metrics_summary.png', dpi=300, bbox_inches='tight')
         plt.close()
     
     def on_train_end(self, trainer, pl_module):
