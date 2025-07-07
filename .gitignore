@@ -1,6 +1,15 @@
-data/all-joined-1/eeg
 env/
 **/__pycache__/
 **/.DS_Store
 **wandb/
-**checkpoints/
+**check_points/
+**lightning_logs/
+**images/
+*.pt
+*.npy
+*.h5
+*.fif
+*.csv
+**configs/
+**dataframes/
+**features/
