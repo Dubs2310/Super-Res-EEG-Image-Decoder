@@ -14,7 +14,7 @@ from utils.datasets.contrastive import EEGContrastiveDataset
 # img_dir = "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\images"
 
 class EEGContrastiveDataModule(EEGDataModule):
-    def __init__(self, input_channels, sfreq, window_before_event_ms, window_after_event_ms, montage=None, eeg_dir=None, epochs_dir=None, img_dir=None, subject=None, session=None, batch_size=32, num_workers=4, val_split=0.1):
+    def __init__(self, input_channels, sfreq, window_before_event_ms, window_after_event_ms, montage=None, eeg_dir=None, epochs_dir=None, img_dir=None, subject=None, session=None, batch_size=32, num_workers=4, val_split=0.1, test='default'):
         self.img_dir = img_dir
         self.base_datamodule_params = {
             'dataset_class': EEGContrastiveDataset,
@@ -29,7 +29,8 @@ class EEGContrastiveDataModule(EEGDataModule):
             'session': session,
             'batch_size': batch_size,
             'num_workers': num_workers,
-            'val_split': val_split
+            'val_split': val_split,
+            'test': test
         }
         super().__init__(**self.base_datamodule_params)
 
