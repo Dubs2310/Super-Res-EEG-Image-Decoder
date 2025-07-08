@@ -294,14 +294,10 @@ class PlottingCallback(pl.Callback):
         self.v10_accs = []
         self.v80_accs = []
         
-        # For t-SNE visualization
-        self.test_embeddings = []
-        self.test_labels = []
-        self.test_super_labels = []
-        
         # For confusion matrix visualization
         self.test_predictions = []
         self.test_true_labels = []
+        self.test_prediction_probs = []  # Store probabilities for PR curves
     
     def on_train_epoch_end(self, trainer, pl_module):
         train_loss = trainer.callback_metrics.get('train_loss', 0)
@@ -317,27 +313,23 @@ class PlottingCallback(pl.Callback):
         self.train_accuracies.append(train_accuracy)
     
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
-        """Collect embeddings, predictions, and labels during test phase"""
+        """Collect predictions and labels during test phase"""
         eeg_data, output = batch
         img, img_features, text_features, super_labels, fine_labels = output
         
-        # Get embeddings before sigmoid (raw model output)
+        # Get predictions using the same logic as in test_step
         with torch.no_grad():
             embeddings = pl_module.encoder(eeg_data)
-            
-            # Get predictions using the same logic as in test_step
             logits_img = pl_module.encoder.logit_scale * embeddings @ pl_module.test_class_features.to(pl_module.device).T
-            predictions = torch.sigmoid(logits_img)
+            prediction_probs = torch.sigmoid(logits_img)
             
             # Convert to binary predictions (threshold at 0.5)
-            binary_predictions = (predictions > 0.5).float()
+            binary_predictions = (prediction_probs > 0.5).float()
         
         # Store data for visualizations
-        self.test_embeddings.append(embeddings.cpu().numpy())
-        self.test_labels.append(fine_labels.cpu().numpy())
-        self.test_super_labels.append(super_labels.cpu().numpy())
         self.test_predictions.append(binary_predictions.cpu().numpy())
         self.test_true_labels.append(fine_labels.cpu().numpy())
+        self.test_prediction_probs.append(prediction_probs.cpu().numpy())
     
     def on_validation_epoch_end(self, trainer, pl_module):
         val_loss = trainer.callback_metrics.get('val_loss', 0)
@@ -382,7 +374,6 @@ class PlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({filename: wandb.Image(plt)})
         
-        # plt.savefig(f'{filename}.png')
         plt.close()
     
     def _create_best_model_info_plot(self, pl_module, trainer):
@@ -408,142 +399,10 @@ class PlottingCallback(pl.Callback):
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"best_model_info": wandb.Image(fig)})
         
-        # plt.savefig('best_model_info.png')
-        plt.close()
-    
-    def _create_tsne_plot(self, pl_module, trainer):
-        """Create t-SNE visualization of test embeddings"""
-        if not self.test_embeddings:
-            print("No test embeddings available for t-SNE visualization")
-            return
-        
-        # Concatenate all embeddings and labels
-        all_embeddings = np.concatenate(self.test_embeddings, axis=0)
-        all_fine_labels = np.concatenate(self.test_labels, axis=0)
-        all_super_labels = np.concatenate(self.test_super_labels, axis=0)
-        
-        print(f"Creating t-SNE visualization with {all_embeddings.shape[0]} samples...")
-        
-        # Limit number of samples for t-SNE if too many (for computational efficiency)
-        max_samples = 2000
-        if all_embeddings.shape[0] > max_samples:
-            indices = np.random.choice(all_embeddings.shape[0], max_samples, replace=False)
-            all_embeddings = all_embeddings[indices]
-            all_fine_labels = all_fine_labels[indices]
-            all_super_labels = all_super_labels[indices]
-            print(f"Subsampled to {max_samples} samples for t-SNE")
-        
-        # Standardize embeddings
-        scaler = StandardScaler()
-        embeddings_scaled = scaler.fit_transform(all_embeddings)
-        
-        # Run t-SNE
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, all_embeddings.shape[0] - 1))
-        embeddings_2d = tsne.fit_transform(embeddings_scaled)
-        
-        # Get COCO categories for labeling
-        coco = COCO()
-        fine_categories = coco.get_fine_categories()
-        super_categories = coco.get_super_categories()
-        
-        # Create t-SNE plot colored by super categories
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-        
-        # Plot 1: Colored by super categories
-        unique_super_labels = np.unique(all_super_labels)
-        colors = plt.cm.Set3(np.linspace(0, 1, len(unique_super_labels)))
-        
-        for i, super_label in enumerate(unique_super_labels):
-            mask = all_super_labels == super_label
-            if np.any(mask):
-                super_name = super_categories[super_label] if super_label < len(super_categories) else f'Super_{super_label}'
-                ax1.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1], 
-                           c=[colors[i]], label=super_name, alpha=0.7, s=20)
-        
-        ax1.set_title('t-SNE of EEG Embeddings (Colored by Super Categories)', fontsize=14, fontweight='bold')
-        ax1.set_xlabel('t-SNE Dimension 1')
-        ax1.set_ylabel('t-SNE Dimension 2')
-        ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Colored by most frequent fine category per sample
-        # For multilabel data, use the first active label for coloring
-        sample_fine_labels = []
-        for fine_label_vector in all_fine_labels:
-            active_labels = np.where(fine_label_vector == 1)[0]
-            if len(active_labels) > 0:
-                sample_fine_labels.append(active_labels[0])  # Use first active label
-            else:
-                sample_fine_labels.append(-1)  # No active label
-        
-        sample_fine_labels = np.array(sample_fine_labels)
-        unique_fine_labels = np.unique(sample_fine_labels)
-        unique_fine_labels = unique_fine_labels[unique_fine_labels >= 0]  # Remove -1 (no label)
-        
-        # Limit to top 20 most frequent fine categories for visibility
-        if len(unique_fine_labels) > 20:
-            label_counts = [(label, np.sum(sample_fine_labels == label)) for label in unique_fine_labels]
-            label_counts.sort(key=lambda x: x[1], reverse=True)
-            unique_fine_labels = np.array([label for label, _ in label_counts[:20]])
-        
-        colors_fine = plt.cm.tab20(np.linspace(0, 1, len(unique_fine_labels)))
-        
-        for i, fine_label in enumerate(unique_fine_labels):
-            mask = sample_fine_labels == fine_label
-            if np.any(mask):
-                fine_name = fine_categories[fine_label] if fine_label < len(fine_categories) else f'Fine_{fine_label}'
-                ax2.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1], 
-                           c=[colors_fine[i]], label=fine_name, alpha=0.7, s=20)
-        
-        # Plot samples with no labels in gray
-        no_label_mask = sample_fine_labels == -1
-        if np.any(no_label_mask):
-            ax2.scatter(embeddings_2d[no_label_mask, 0], embeddings_2d[no_label_mask, 1], 
-                       c='gray', label='No Label', alpha=0.5, s=20)
-        
-        ax2.set_title('t-SNE of EEG Embeddings (Colored by Fine Categories - Top 20)', fontsize=14, fontweight='bold')
-        ax2.set_xlabel('t-SNE Dimension 1')
-        ax2.set_ylabel('t-SNE Dimension 2')
-        ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Log to wandb
-        if trainer.logger and hasattr(trainer.logger, 'experiment'):
-            trainer.logger.experiment.log({"tsne_embeddings": wandb.Image(fig)})
-        
-        # plt.savefig('tsne_embeddings.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Create a simpler density plot
-        self._create_tsne_density_plot(embeddings_2d, trainer)
-        
-        print("t-SNE visualization completed!")
-    
-    def _create_tsne_density_plot(self, embeddings_2d, trainer):
-        """Create a density plot of the t-SNE embeddings"""
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        # Create a hexbin plot for density visualization
-        hb = ax.hexbin(embeddings_2d[:, 0], embeddings_2d[:, 1], gridsize=30, cmap='Blues', alpha=0.8)
-        
-        ax.set_title('t-SNE Embedding Density Plot', fontsize=14, fontweight='bold')
-        ax.set_xlabel('t-SNE Dimension 1')
-        ax.set_ylabel('t-SNE Dimension 2')
-        
-        # Add colorbar
-        plt.colorbar(hb, ax=ax, label='Point Density')
-        
-        # Log to wandb
-        if trainer.logger and hasattr(trainer.logger, 'experiment'):
-            trainer.logger.experiment.log({"tsne_density": wandb.Image(fig)})
-        
-        # plt.savefig('tsne_density.png', dpi=300, bbox_inches='tight')
         plt.close()
     
     def _create_confusion_matrix_plot(self, pl_module, trainer):
-        """Create per-class confusion matrix plot for multilabel classification"""
+        """Create per-class 2x2 confusion matrix plots for multilabel classification"""
         if not self.test_predictions or not self.test_true_labels:
             print("No test predictions available for confusion matrix visualization")
             return
@@ -558,21 +417,17 @@ class PlottingCallback(pl.Callback):
         coco = COCO()
         fine_categories = coco.get_fine_categories()
         
-        # Calculate grid dimensions
+        # Calculate grid dimensions for 2x2 confusion matrices
         if num_classes <= 16:
-            # For 16 or fewer classes, use 4x4 grid
             cols = 4
             rows = int(np.ceil(num_classes / cols))
         elif num_classes <= 25:
-            # For 17-25 classes, use 5x5 grid
             cols = 5
             rows = int(np.ceil(num_classes / cols))
         elif num_classes <= 64:
-            # For 26-64 classes, use 8x8 grid
             cols = 8
             rows = int(np.ceil(num_classes / cols))
         else:
-            # For more than 64 classes, use 10x10 grid
             cols = 10
             rows = int(np.ceil(num_classes / cols))
         
@@ -588,130 +443,369 @@ class PlottingCallback(pl.Callback):
         else:
             axes = axes.ravel()
         
-        # Create confusion matrices for each class
-        displays = []
+        # Create 2x2 confusion matrices for each class
         for i in range(num_classes):
             # Get class name
             class_name = fine_categories[i] if i < len(fine_categories) else f'Class {i}'
-            class_name = class_name[:15] + '...' if len(class_name) > 15 else class_name  # Truncate long names
+            class_name = class_name[:15] + '...' if len(class_name) > 15 else class_name
             
-            # Create confusion matrix for this class
-            cm = confusion_matrix(y_true[:, i], y_pred[:, i])
-            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
+            # Create confusion matrix for this binary classification task
+            cm = confusion_matrix(y_true[:, i], y_pred[:, i], labels=[0, 1])
             
             # Plot on the corresponding axis
             ax = axes[i] if len(axes) > i else None
             if ax is not None:
-                disp.plot(ax=ax, values_format='.4g', cmap='Blues')
-                disp.ax_.set_title(f'{class_name}', fontsize=10, pad=5)
+                disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Negative', 'Positive'])
+                disp.plot(ax=ax, values_format='d', cmap='Blues', colorbar=False)
+                ax.set_title(f'{class_name}', fontsize=10, pad=5)
+                
+                # Calculate metrics for annotation
+                tn, fp, fn, tp = cm.ravel()
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+                
+                # Add metrics as text below the confusion matrix
+                metrics_text = f'P: {precision:.3f}, R: {recall:.3f}, F1: {f1:.3f}'
+                ax.text(0.5, -0.15, metrics_text, transform=ax.transAxes, 
+                       ha='center', va='top', fontsize=8)
                 
                 # Remove x-label for all but bottom row
                 if i < num_classes - cols:
-                    disp.ax_.set_xlabel('')
+                    ax.set_xlabel('')
                 
                 # Remove y-label for all but leftmost column
                 if i % cols != 0:
-                    disp.ax_.set_ylabel('')
-                
-                # Remove individual colorbars
-                if hasattr(disp, 'im_') and disp.im_.colorbar:
-                    disp.im_.colorbar.remove()
-                
-                displays.append(disp)
+                    ax.set_ylabel('')
         
         # Hide unused subplots
         for i in range(num_classes, len(axes)):
             axes[i].set_visible(False)
         
         # Adjust layout
-        plt.subplots_adjust(wspace=0.15, hspace=0.3)
-        
-        # Add a single colorbar for all subplots
-        if displays:
-            f.colorbar(displays[0].im_, ax=axes, shrink=0.8, aspect=30)
+        plt.subplots_adjust(wspace=0.2, hspace=0.4)
         
         # Add overall title
-        plt.suptitle('Per-Class Confusion Matrices (Multilabel Classification)', 
+        plt.suptitle('Per-Class 2x2 Confusion Matrices (Multilabel Classification)', 
                     fontsize=16, fontweight='bold', y=0.98)
         
         # Log to wandb
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
             trainer.logger.experiment.log({"confusion_matrices_per_class": wandb.Image(f)})
         
-        # plt.savefig('confusion_matrices_per_class.png', dpi=300, bbox_inches='tight')
         plt.close()
-        
-        # Create summary statistics plot
-        self._create_confusion_matrix_summary_stats(y_true, y_pred, fine_categories, trainer)
-        
         print("Confusion matrix visualization completed!")
     
-    def _create_confusion_matrix_summary_stats(self, y_true, y_pred, fine_categories, trainer):
-        """Create a summary plot with precision, recall, F1 for each class"""
-        from sklearn.metrics import precision_score, recall_score, f1_score
+    def _create_classification_report_plot(self, pl_module, trainer):
+        """Create a classification report visualization"""
+        if not self.test_predictions or not self.test_true_labels:
+            print("No test predictions available for classification report")
+            return
         
-        num_classes = y_true.shape[1]
+        from sklearn.metrics import classification_report, precision_recall_fscore_support
+        
+        # Concatenate all predictions and labels
+        y_pred = np.concatenate(self.test_predictions, axis=0)
+        y_true = np.concatenate(self.test_true_labels, axis=0)
+        
+        num_classes = y_pred.shape[1]
+        
+        # Get COCO fine categories for labels
+        coco = COCO()
+        fine_categories = coco.get_fine_categories()
         
         # Calculate metrics for each class
-        precisions = []
-        recalls = []
-        f1_scores = []
-        class_names = []
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_true, y_pred, average=None, zero_division=0
+        )
         
-        for i in range(num_classes):
-            precision = precision_score(y_true[:, i], y_pred[:, i], zero_division=0)
-            recall = recall_score(y_true[:, i], y_pred[:, i], zero_division=0)
-            f1 = f1_score(y_true[:, i], y_pred[:, i], zero_division=0)
-            
-            precisions.append(precision)
-            recalls.append(recall)
-            f1_scores.append(f1)
-            
-            class_name = fine_categories[i] if i < len(fine_categories) else f'Class {i}'
-            class_names.append(class_name)
+        # Calculate macro and micro averages
+        macro_precision = np.mean(precision)
+        macro_recall = np.mean(recall)
+        macro_f1 = np.mean(f1)
         
-        # Create bar plot
+        micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(
+            y_true, y_pred, average='micro', zero_division=0
+        )
+        
+        # Create the classification report table
+        class_names = [fine_categories[i] if i < len(fine_categories) else f'Class {i}' 
+                      for i in range(num_classes)]
+        
+        # Create a DataFrame for better visualization
+        import pandas as pd
+        
+        report_data = {
+            'Class': class_names + ['macro avg', 'micro avg'],
+            'Precision': list(precision) + [macro_precision, micro_precision],
+            'Recall': list(recall) + [macro_recall, micro_recall],
+            'F1-Score': list(f1) + [macro_f1, micro_f1],
+            'Support': list(support) + [np.sum(support), np.sum(support)]
+        }
+        
+        df = pd.DataFrame(report_data)
+        
+        # Create the plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, max(12, num_classes * 0.3)))
+        
+        # Plot 1: Bar chart of metrics per class
         x = np.arange(num_classes)
         width = 0.25
         
-        fig, ax = plt.subplots(figsize=(max(15, num_classes * 0.5), 8))
+        bars1 = ax1.bar(x - width, precision, width, label='Precision', alpha=0.8, color='skyblue')
+        bars2 = ax1.bar(x, recall, width, label='Recall', alpha=0.8, color='lightcoral')
+        bars3 = ax1.bar(x + width, f1, width, label='F1-Score', alpha=0.8, color='lightgreen')
         
-        bars1 = ax.bar(x - width, precisions, width, label='Precision', alpha=0.8, color='skyblue')
-        bars2 = ax.bar(x, recalls, width, label='Recall', alpha=0.8, color='lightcoral')
-        bars3 = ax.bar(x + width, f1_scores, width, label='F1-Score', alpha=0.8, color='lightgreen')
+        ax1.set_xlabel('Classes')
+        ax1.set_ylabel('Score')
+        ax1.set_title('Per-Class Performance Metrics')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([name[:10] + '...' if len(name) > 10 else name for name in class_names], 
+                           rotation=45, ha='right')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3, axis='y')
+        ax1.set_ylim(0, 1.05)
         
-        ax.set_xlabel('Classes')
-        ax.set_ylabel('Score')
-        ax.set_title('Per-Class Performance Metrics (Precision, Recall, F1-Score)')
-        ax.set_xticks(x)
-        ax.set_xticklabels([name[:10] + '...' if len(name) > 10 else name for name in class_names], 
-                          rotation=45, ha='right')
-        ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
-        ax.set_ylim(0, 1.05)
+        # Add macro and micro average lines
+        ax1.axhline(y=macro_precision, color='blue', linestyle='--', alpha=0.7, label=f'Macro Avg Precision: {macro_precision:.3f}')
+        ax1.axhline(y=macro_recall, color='red', linestyle='--', alpha=0.7, label=f'Macro Avg Recall: {macro_recall:.3f}')
+        ax1.axhline(y=macro_f1, color='green', linestyle='--', alpha=0.7, label=f'Macro Avg F1: {macro_f1:.3f}')
+        ax1.legend(loc='upper right')
         
-        # Add value labels on bars
-        def autolabel(bars):
-            for bar in bars:
-                height = bar.get_height()
-                if height > 0.05:  # Only show label if bar is tall enough
-                    ax.annotate(f'{height:.2f}',
-                               xy=(bar.get_x() + bar.get_width() / 2, height),
-                               xytext=(0, 3),  # 3 points vertical offset
-                               textcoords="offset points",
-                               ha='center', va='bottom', fontsize=8)
+        # Plot 2: Table with detailed metrics
+        ax2.axis('tight')
+        ax2.axis('off')
         
-        autolabel(bars1)
-        autolabel(bars2)
-        autolabel(bars3)
+        # Create table data for display (showing first 20 classes + averages)
+        display_rows = min(20, num_classes)
+        table_data = []
+        
+        for i in range(display_rows):
+            table_data.append([
+                class_names[i][:15] + '...' if len(class_names[i]) > 15 else class_names[i],
+                f'{precision[i]:.3f}',
+                f'{recall[i]:.3f}',
+                f'{f1[i]:.3f}',
+                f'{int(support[i])}'
+            ])
+        
+        # Add average rows
+        table_data.append(['', '', '', '', ''])  # Empty row
+        table_data.append([
+            'macro avg',
+            f'{macro_precision:.3f}',
+            f'{macro_recall:.3f}',
+            f'{macro_f1:.3f}',
+            f'{int(np.sum(support))}'
+        ])
+        table_data.append([
+            'micro avg',
+            f'{micro_precision:.3f}',
+            f'{micro_recall:.3f}',
+            f'{micro_f1:.3f}',
+            f'{int(np.sum(support))}'
+        ])
+        
+        table = ax2.table(cellText=table_data,
+                         colLabels=['Class', 'Precision', 'Recall', 'F1-Score', 'Support'],
+                         cellLoc='center',
+                         loc='center')
+        
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.2, 1.5)
+        
+        # Color the header
+        for i in range(5):
+            table[(0, i)].set_facecolor('#40466e')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        # Color the average rows
+        for i in range(5):
+            table[(len(table_data) - 2, i)].set_facecolor('#f0f0f0')  # macro avg
+            table[(len(table_data) - 1, i)].set_facecolor('#e0e0e0')  # micro avg
+        
+        ax2.set_title(f'Classification Report (Showing first {display_rows} classes)', 
+                     fontsize=12, fontweight='bold', pad=20)
         
         plt.tight_layout()
         
         # Log to wandb
         if trainer.logger and hasattr(trainer.logger, 'experiment'):
-            trainer.logger.experiment.log({"per_class_metrics_summary": wandb.Image(fig)})
+            trainer.logger.experiment.log({"classification_report": wandb.Image(fig)})
         
-        # plt.savefig('per_class_metrics_summary.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Print detailed classification report to console
+        print("\n" + "="*80)
+        print("DETAILED CLASSIFICATION REPORT")
+        print("="*80)
+        target_names = [f"Class_{i}_{name}" for i, name in enumerate(class_names)]
+        print(classification_report(y_true, y_pred, target_names=target_names, zero_division=0))
+        print("="*80)
+        
+        print("Classification report visualization completed!")
+    
+    def _create_precision_recall_curves(self, pl_module, trainer):
+        """Create precision-recall curves for all labels with global AUC average"""
+        if not self.test_prediction_probs or not self.test_true_labels:
+            print("No test prediction probabilities available for PR curves")
+            return
+        
+        from sklearn.metrics import precision_recall_curve, auc, average_precision_score
+        
+        # Concatenate all prediction probabilities and labels
+        y_probs = np.concatenate(self.test_prediction_probs, axis=0)
+        y_true = np.concatenate(self.test_true_labels, axis=0)
+        
+        num_classes = y_true.shape[1]
+        
+        # Get COCO fine categories for labels
+        coco = COCO()
+        fine_categories = coco.get_fine_categories()
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Colors for different classes
+        colors = plt.cm.tab20(np.linspace(0, 1, min(20, num_classes)))
+        if num_classes > 20:
+            # For more than 20 classes, use a continuous colormap
+            colors = plt.cm.viridis(np.linspace(0, 1, num_classes))
+        
+        auc_scores = []
+        
+        # Plot PR curve for each class
+        for i in range(num_classes):
+            precision, recall, _ = precision_recall_curve(y_true[:, i], y_probs[:, i])
+            auc_score = auc(recall, precision)
+            avg_precision = average_precision_score(y_true[:, i], y_probs[:, i])
+            auc_scores.append(auc_score)
+            
+            class_name = fine_categories[i] if i < len(fine_categories) else f'Class {i}'
+            
+            # Only show labels for first few classes to avoid clutter
+            if i < 10:
+                label = f'{class_name[:10]}... (AUC={auc_score:.3f})' if len(class_name) > 10 else f'{class_name} (AUC={auc_score:.3f})'
+                ax.plot(recall, precision, color=colors[i % len(colors)], 
+                       label=label, alpha=0.7, linewidth=1.5)
+            else:
+                ax.plot(recall, precision, color=colors[i % len(colors)], 
+                       alpha=0.3, linewidth=0.8)
+        
+        # Calculate and display global average AUC
+        global_avg_auc = np.mean(auc_scores)
+        
+        # Add random classifier line
+        ax.plot([0, 1], [0.5, 0.5], 'k--', alpha=0.5, label='Random Classifier')
+        
+        # Customize plot
+        ax.set_xlabel('Recall', fontsize=12)
+        ax.set_ylabel('Precision', fontsize=12)
+        ax.set_title(f'Precision-Recall Curves for All Classes\nGlobal Average AUC: {global_avg_auc:.4f}', 
+                    fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        
+        # Add legend (only for first 10 classes to avoid clutter)
+        if num_classes <= 10:
+            ax.legend(loc='lower left', fontsize=10)
+        else:
+            # Create custom legend showing only global average
+            from matplotlib.lines import Line2D
+            custom_lines = [
+                Line2D([0], [0], color='gray', alpha=0.7, linewidth=2),
+                Line2D([0], [0], color='black', linestyle='--', alpha=0.5)
+            ]
+            ax.legend(custom_lines, 
+                     [f'All Classes (Avg AUC: {global_avg_auc:.4f})', 'Random Classifier'],
+                     loc='lower left', fontsize=10)
+        
+        # Add text box with summary statistics
+        textstr = f'''Summary Statistics:
+Total Classes: {num_classes}
+Global Avg AUC: {global_avg_auc:.4f}
+Min AUC: {np.min(auc_scores):.4f}
+Max AUC: {np.max(auc_scores):.4f}
+Std AUC: {np.std(auc_scores):.4f}'''
+        
+        props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=props)
+        
+        plt.tight_layout()
+        
+        # Log to wandb
+        if trainer.logger and hasattr(trainer.logger, 'experiment'):
+            trainer.logger.experiment.log({"precision_recall_curves": wandb.Image(fig)})
+        
+        plt.close()
+        
+        # Create a separate plot showing AUC distribution
+        self._create_auc_distribution_plot(auc_scores, fine_categories, trainer)
+        
+        print(f"Precision-Recall curves completed! Global Average AUC: {global_avg_auc:.4f}")
+    
+    def _create_auc_distribution_plot(self, auc_scores, fine_categories, trainer):
+        """Create a histogram of AUC scores distribution"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Plot 1: Histogram of AUC scores
+        ax1.hist(auc_scores, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+        ax1.axvline(np.mean(auc_scores), color='red', linestyle='--', 
+                   label=f'Mean: {np.mean(auc_scores):.4f}')
+        ax1.axvline(np.median(auc_scores), color='green', linestyle='--', 
+                   label=f'Median: {np.median(auc_scores):.4f}')
+        ax1.set_xlabel('AUC Score')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Distribution of AUC Scores Across Classes')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Top 10 and Bottom 10 classes by AUC
+        sorted_indices = np.argsort(auc_scores)
+        bottom_10 = sorted_indices[:10]
+        top_10 = sorted_indices[-10:]
+        
+        # Combine top and bottom
+        selected_indices = np.concatenate([bottom_10, top_10])
+        selected_aucs = [auc_scores[i] for i in selected_indices]
+        selected_names = [fine_categories[i] if i < len(fine_categories) else f'Class {i}' 
+                         for i in selected_indices]
+        
+        # Truncate long names
+        selected_names = [name[:15] + '...' if len(name) > 15 else name for name in selected_names]
+        
+        # Create colors (red for bottom, green for top)
+        colors = ['red'] * 10 + ['green'] * 10
+        
+        y_pos = np.arange(len(selected_names))
+        bars = ax2.barh(y_pos, selected_aucs, color=colors, alpha=0.7)
+        
+        ax2.set_yticks(y_pos)
+        ax2.set_yticklabels(selected_names, fontsize=8)
+        ax2.set_xlabel('AUC Score')
+        ax2.set_title('Top 10 and Bottom 10 Classes by AUC')
+        ax2.grid(True, alpha=0.3, axis='x')
+        
+        # Add value labels on bars
+        for i, (bar, auc) in enumerate(zip(bars, selected_aucs)):
+            ax2.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
+                    f'{auc:.3f}', va='center', fontsize=8)
+        
+        # Add dividing line between bottom and top
+        ax2.axhline(y=9.5, color='black', linestyle='-', alpha=0.5)
+        ax2.text(0.5, 9.5, 'Bottom 10 | Top 10', transform=ax2.get_yaxis_transform(), 
+                ha='center', va='center', fontsize=10, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # Log to wandb
+        if trainer.logger and hasattr(trainer.logger, 'experiment'):
+            trainer.logger.experiment.log({"auc_distribution": wandb.Image(fig)})
+        
         plt.close()
     
     def on_train_end(self, trainer, pl_module):
@@ -754,12 +848,9 @@ class PlottingCallback(pl.Callback):
         
         # Create best model info plot
         self._create_best_model_info_plot(pl_module, trainer)
-        
-        # Create confusion matrix plot (only if test metrics are available)
-        if hasattr(pl_module, 'test_confusion_matrix') and pl_module.test_confusion_matrix.confmat is not None:
-            self._create_confusion_matrix_plot(pl_module, trainer)
     
     def on_test_end(self, trainer, pl_module):
-        """Create confusion matrix plot and t-SNE visualization after test phase"""
+        """Create all test visualizations after test phase"""
         self._create_confusion_matrix_plot(pl_module, trainer)
-        self._create_tsne_plot(pl_module, trainer)
+        self._create_classification_report_plot(pl_module, trainer)
+        self._create_precision_recall_curves(pl_module, trainer)
