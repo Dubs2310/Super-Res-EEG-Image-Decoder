@@ -18,8 +18,8 @@ def load_config():
 
 CONFIG = load_config()
 DEFAULT_EEG_MONTAGE = CONFIG.get('eeg', {}).get('montage', 'standard_1020')
-DEFAULT_EEG_PATH = CONFIG.get('eeg', {}).get('preprocessed_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\eeg\\preprocessed")
-DEFAULT_EPOCH_PATH = CONFIG.get('eeg', {}).get('epochs_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\eeg\\epochs")
+DEFAULT_EEG_PATH = CONFIG.get('eeg', {}).get('preprocessed_dir', "/workspace/eeg-image-decoding/data/all-joined-1/eeg/preprocessed")
+DEFAULT_EPOCH_PATH = CONFIG.get('eeg', {}).get('epochs_dir', "/workspace/eeg-image-decoding/data/all-joined-1/eeg/epochs")
 
 print(DEFAULT_EPOCH_PATH)
 

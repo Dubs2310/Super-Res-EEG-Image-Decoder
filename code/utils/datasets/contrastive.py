@@ -17,7 +17,7 @@ def load_config():
 
 
 CONFIG = load_config()
-DEFAULT_IMAGE_DIR = CONFIG.get('coco', {}).get('image_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\images")
+DEFAULT_IMAGE_DIR = CONFIG.get('coco', {}).get('image_dir', "/workspace/eeg-image-decoding/data/all-joined-1/coco/images")
 
 class EEGContrastiveDataset(EEGDataset):
     def __init__(self, img_pair_df: pd.DataFrame, input_channels, sfreq, window_before_event_ms, window_after_event_ms, features, montage=None, eeg_dir=None, epochs_dir=None, img_dir=None, img_preprocess_transform=None):

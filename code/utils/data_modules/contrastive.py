@@ -1,3 +1,4 @@
+import torch
 from utils.data_modules.base import EEGDataModule
 from utils.datasets.contrastive import EEGContrastiveDataset
 
@@ -35,7 +36,24 @@ class EEGContrastiveDataModule(EEGDataModule):
         super().__init__(**self.base_datamodule_params)
 
     def get_dataset_output_params(self, df, split='train'):
-        if split in ['train', 'val']:
+        if split == 'all':
+            # Get both train and test features
+            _, train_img_feat, train_text_feat, train_img_to_indices = self.coco.get_train_set()
+            _, test_img_feat, test_text_feat, test_img_to_indices = self.coco.get_test_set()
+            
+            # Concatenate features
+            concatenated_img_feat = torch.cat([train_img_feat, test_img_feat], dim=0)
+            concatenated_text_feat = torch.cat([train_text_feat, test_text_feat], dim=0)
+            
+            # Merge img_id_to_indices dictionaries
+            concatenated_img_to_indices = {**train_img_to_indices, **test_img_to_indices}
+            
+            features = { 
+                'image_features': concatenated_img_feat,
+                'text_features': concatenated_text_feat,
+                'img_id_to_indices': concatenated_img_to_indices
+            }
+        elif split in ['train', 'val']:
             _, train_img_feat, train_text_feat, train_img_to_indices = self.coco.get_train_set()
             features = { 
                 'image_features': train_img_feat,

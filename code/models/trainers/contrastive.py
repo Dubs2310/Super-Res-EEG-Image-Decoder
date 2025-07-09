@@ -1,3 +1,4 @@
+import os
 import wandb 
 import torch
 import random
@@ -863,3 +864,34 @@ Std AUC: {np.std(auc_scores):.4f}'''
         self._create_confusion_matrix_plot(pl_module, trainer)
         self._create_classification_report_plot(pl_module, trainer)
         self._create_precision_recall_curves(pl_module, trainer)
+
+
+
+class EmbeddingSaveCallback(pl.Callback):
+    def __init__(self, save_dir="embeddings", filename="test_embeddings.npy"):
+        self.save_dir = save_dir
+        self.filename = filename
+        self.test_embeddings = []
+        
+    def on_test_start(self, trainer, pl_module):
+        # Create save directory if it doesn't exist
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.test_embeddings = []
+    
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        eeg_data, output = batch
+        
+        # Get embeddings
+        with torch.no_grad():
+            embeddings = pl_module.encoder(eeg_data)
+        
+        # Store embeddings
+        self.test_embeddings.append(embeddings.cpu().numpy())
+    
+    def on_test_end(self, trainer, pl_module):
+        # Concatenate all embeddings
+        all_embeddings = np.concatenate(self.test_embeddings, axis=0)
+        
+        # Save embeddings
+        filepath = os.path.join(self.save_dir, self.filename)
+        np.save(filepath, all_embeddings)

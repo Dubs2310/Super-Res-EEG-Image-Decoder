@@ -61,6 +61,11 @@ class EEGDataModule(pl.LightningDataModule):
             raise ValueError("No samples found in dataset")
 
     def setup(self, stage=None):
+        # Check if datasets are already initialized
+        if hasattr(self, 'train_dataset') and hasattr(self, 'val_dataset') and hasattr(self, 'test_dataset'):
+            print("Datasets already initialized, skipping setup")
+            return
+            
         if self.test == 'All':
             # Use all available data for the specified subject/session as TEST SET
             print(f"Using ALL data for subject={self.subject}, session={self.session} as TEST SET")
@@ -101,7 +106,10 @@ class EEGDataModule(pl.LightningDataModule):
         print('Creating Datasets...')
         train_output_args = self.get_dataset_output_params(train_df, 'train')
         val_output_args = self.get_dataset_output_params(val_df, 'val')
-        test_output_args = self.get_dataset_output_params(test_df, 'test')
+        
+        # Pass 'all' split for test dataset when using all data
+        test_split = 'all' if self.test == 'All' else 'test'
+        test_output_args = self.get_dataset_output_params(test_df, test_split)
         
         # Create datasets
         self.train_dataset = self.dataset_class(train_df, **self.dataset_input_params, **train_output_args)
