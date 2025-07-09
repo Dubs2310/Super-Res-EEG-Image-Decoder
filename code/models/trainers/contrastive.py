@@ -190,18 +190,19 @@ class ContrastiveTrainerModel(pl.LightningModule):
         # Use pre-computed class features for test evaluation
         logits_img = self.encoder.logit_scale * eeg_features @ self.test_class_features.to(self.device).T
         preds = torch.sigmoid(logits_img)
-        targets = fine_labels.float()
+        targets_float = fine_labels.float()
+        targets_int = fine_labels.int()
         
-        # Update all test metrics
-        self.test_precision.update(preds, targets)
-        self.test_recall.update(preds, targets)
-        self.test_f1.update(preds, targets)
-        self.test_auroc.update(preds, targets)
-        self.test_confusion_matrix.update(preds, targets.int())
+        # Update all test metrics with appropriate data types
+        self.test_precision.update(preds, targets_int)
+        self.test_recall.update(preds, targets_int)
+        self.test_f1.update(preds, targets_int)
+        self.test_auroc.update(preds, targets_int)
+        self.test_confusion_matrix.update(preds, targets_int)
         
-        # Also update validation metrics for consistency
+        # Also update validation metrics for consistency (these expect float)
         self.val_loss.update(loss)
-        self.val_accuracy.update(preds, targets)
+        self.val_accuracy.update(preds, targets_float)
         
         return loss
 
@@ -415,7 +416,7 @@ class PlottingCallback(pl.Callback):
         
         # Get COCO fine categories for labels
         coco = COCO()
-        fine_categories = coco.get_fine_categories()
+        fine_categories = coco.all_fine_categories
         
         # Calculate grid dimensions for 2x2 confusion matrices
         if num_classes <= 16:
@@ -459,17 +460,6 @@ class PlottingCallback(pl.Callback):
                 disp.plot(ax=ax, values_format='d', cmap='Blues', colorbar=False)
                 ax.set_title(f'{class_name}', fontsize=10, pad=5)
                 
-                # Calculate metrics for annotation
-                tn, fp, fn, tp = cm.ravel()
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-                
-                # Add metrics as text below the confusion matrix
-                metrics_text = f'P: {precision:.3f}, R: {recall:.3f}, F1: {f1:.3f}'
-                ax.text(0.5, -0.15, metrics_text, transform=ax.transAxes, 
-                       ha='center', va='top', fontsize=8)
-                
                 # Remove x-label for all but bottom row
                 if i < num_classes - cols:
                     ax.set_xlabel('')
@@ -502,7 +492,7 @@ class PlottingCallback(pl.Callback):
             print("No test predictions available for classification report")
             return
         
-        from sklearn.metrics import classification_report, precision_recall_fscore_support
+        from sklearn.metrics import classification_report, precision_recall_fscore_support, accuracy_score
         
         # Concatenate all predictions and labels
         y_pred = np.concatenate(self.test_predictions, axis=0)
@@ -512,90 +502,102 @@ class PlottingCallback(pl.Callback):
         
         # Get COCO fine categories for labels
         coco = COCO()
-        fine_categories = coco.get_fine_categories()
+        fine_categories = coco.all_fine_categories
         
         # Calculate metrics for each class
         precision, recall, f1, support = precision_recall_fscore_support(
             y_true, y_pred, average=None, zero_division=0
         )
         
+        # Calculate accuracy for each class (per-label accuracy)
+        accuracy = []
+        for i in range(num_classes):
+            acc = accuracy_score(y_true[:, i], y_pred[:, i])
+            accuracy.append(acc)
+        accuracy = np.array(accuracy)
+        
         # Calculate macro and micro averages
         macro_precision = np.mean(precision)
         macro_recall = np.mean(recall)
         macro_f1 = np.mean(f1)
+        macro_accuracy = np.mean(accuracy)
         
         micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(
             y_true, y_pred, average='micro', zero_division=0
         )
+        # Micro accuracy for multilabel is the same as Hamming loss complement
+        micro_accuracy = accuracy_score(y_true, y_pred)
         
         # Create the classification report table
         class_names = [fine_categories[i] if i < len(fine_categories) else f'Class {i}' 
                       for i in range(num_classes)]
         
-        # Create a DataFrame for better visualization
-        import pandas as pd
+        # Sort classes by precision (highest first)
+        sorted_indices = np.argsort(precision)[::-1]
         
-        report_data = {
-            'Class': class_names + ['macro avg', 'micro avg'],
-            'Precision': list(precision) + [macro_precision, micro_precision],
-            'Recall': list(recall) + [macro_recall, micro_recall],
-            'F1-Score': list(f1) + [macro_f1, micro_f1],
-            'Support': list(support) + [np.sum(support), np.sum(support)]
-        }
-        
-        df = pd.DataFrame(report_data)
+        # Create sorted arrays
+        sorted_precision = precision[sorted_indices]
+        sorted_recall = recall[sorted_indices]
+        sorted_f1 = f1[sorted_indices]
+        sorted_accuracy = accuracy[sorted_indices]
+        sorted_support = support[sorted_indices]
+        sorted_class_names = [class_names[i] for i in sorted_indices]
         
         # Create the plot
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, max(12, num_classes * 0.3)))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, max(12, num_classes * 0.3)))
         
-        # Plot 1: Bar chart of metrics per class
+        # Plot 1: Bar chart of metrics per class (sorted by precision)
         x = np.arange(num_classes)
-        width = 0.25
+        width = 0.2
         
-        bars1 = ax1.bar(x - width, precision, width, label='Precision', alpha=0.8, color='skyblue')
-        bars2 = ax1.bar(x, recall, width, label='Recall', alpha=0.8, color='lightcoral')
-        bars3 = ax1.bar(x + width, f1, width, label='F1-Score', alpha=0.8, color='lightgreen')
+        bars1 = ax1.bar(x - 1.5*width, sorted_precision, width, label='Precision', alpha=0.8, color='skyblue')
+        bars2 = ax1.bar(x - 0.5*width, sorted_recall, width, label='Recall', alpha=0.8, color='lightcoral')
+        bars3 = ax1.bar(x + 0.5*width, sorted_f1, width, label='F1-Score', alpha=0.8, color='lightgreen')
+        bars4 = ax1.bar(x + 1.5*width, sorted_accuracy, width, label='Accuracy', alpha=0.8, color='gold')
         
-        ax1.set_xlabel('Classes')
+        ax1.set_xlabel('Classes (Sorted by Precision - Highest to Lowest)')
         ax1.set_ylabel('Score')
-        ax1.set_title('Per-Class Performance Metrics')
+        ax1.set_title('Per-Class Performance Metrics (Sorted by Precision)')
         ax1.set_xticks(x)
-        ax1.set_xticklabels([name[:10] + '...' if len(name) > 10 else name for name in class_names], 
+        ax1.set_xticklabels([name[:10] + '...' if len(name) > 10 else name for name in sorted_class_names], 
                            rotation=45, ha='right')
         ax1.legend()
         ax1.grid(True, alpha=0.3, axis='y')
         ax1.set_ylim(0, 1.05)
         
-        # Add macro and micro average lines
+        # Add macro average lines
         ax1.axhline(y=macro_precision, color='blue', linestyle='--', alpha=0.7, label=f'Macro Avg Precision: {macro_precision:.3f}')
         ax1.axhline(y=macro_recall, color='red', linestyle='--', alpha=0.7, label=f'Macro Avg Recall: {macro_recall:.3f}')
         ax1.axhline(y=macro_f1, color='green', linestyle='--', alpha=0.7, label=f'Macro Avg F1: {macro_f1:.3f}')
+        ax1.axhline(y=macro_accuracy, color='orange', linestyle='--', alpha=0.7, label=f'Macro Avg Accuracy: {macro_accuracy:.3f}')
         ax1.legend(loc='upper right')
         
-        # Plot 2: Table with detailed metrics
+        # Plot 2: Table with detailed metrics (top 20 classes by precision)
         ax2.axis('tight')
         ax2.axis('off')
         
-        # Create table data for display (showing first 20 classes + averages)
+        # Create table data for display (showing top 20 classes by precision + averages)
         display_rows = min(20, num_classes)
         table_data = []
         
         for i in range(display_rows):
             table_data.append([
-                class_names[i][:15] + '...' if len(class_names[i]) > 15 else class_names[i],
-                f'{precision[i]:.3f}',
-                f'{recall[i]:.3f}',
-                f'{f1[i]:.3f}',
-                f'{int(support[i])}'
+                sorted_class_names[i][:15] + '...' if len(sorted_class_names[i]) > 15 else sorted_class_names[i],
+                f'{sorted_precision[i]:.3f}',
+                f'{sorted_recall[i]:.3f}',
+                f'{sorted_f1[i]:.3f}',
+                f'{sorted_accuracy[i]:.3f}',
+                f'{int(sorted_support[i])}'
             ])
         
         # Add average rows
-        table_data.append(['', '', '', '', ''])  # Empty row
+        table_data.append(['', '', '', '', '', ''])  # Empty row
         table_data.append([
             'macro avg',
             f'{macro_precision:.3f}',
             f'{macro_recall:.3f}',
             f'{macro_f1:.3f}',
+            f'{macro_accuracy:.3f}',
             f'{int(np.sum(support))}'
         ])
         table_data.append([
@@ -603,29 +605,30 @@ class PlottingCallback(pl.Callback):
             f'{micro_precision:.3f}',
             f'{micro_recall:.3f}',
             f'{micro_f1:.3f}',
+            f'{micro_accuracy:.3f}',
             f'{int(np.sum(support))}'
         ])
         
         table = ax2.table(cellText=table_data,
-                         colLabels=['Class', 'Precision', 'Recall', 'F1-Score', 'Support'],
+                         colLabels=['Class', 'Precision', 'Recall', 'F1-Score', 'Accuracy', 'Support'],
                          cellLoc='center',
                          loc='center')
         
         table.auto_set_font_size(False)
-        table.set_fontsize(9)
+        table.set_fontsize(8)
         table.scale(1.2, 1.5)
         
         # Color the header
-        for i in range(5):
+        for i in range(6):
             table[(0, i)].set_facecolor('#40466e')
             table[(0, i)].set_text_props(weight='bold', color='white')
         
         # Color the average rows
-        for i in range(5):
+        for i in range(6):
             table[(len(table_data) - 2, i)].set_facecolor('#f0f0f0')  # macro avg
             table[(len(table_data) - 1, i)].set_facecolor('#e0e0e0')  # micro avg
         
-        ax2.set_title(f'Classification Report (Showing first {display_rows} classes)', 
+        ax2.set_title(f'Classification Report (Top {display_rows} classes by Precision)', 
                      fontsize=12, fontweight='bold', pad=20)
         
         plt.tight_layout()
@@ -637,12 +640,18 @@ class PlottingCallback(pl.Callback):
         plt.close()
         
         # Print detailed classification report to console
-        print("\n" + "="*80)
-        print("DETAILED CLASSIFICATION REPORT")
-        print("="*80)
-        target_names = [f"Class_{i}_{name}" for i, name in enumerate(class_names)]
-        print(classification_report(y_true, y_pred, target_names=target_names, zero_division=0))
-        print("="*80)
+        print("\n" + "="*90)
+        print("DETAILED CLASSIFICATION REPORT (Top 20 Classes by Precision)")
+        print("="*90)
+        for i in range(min(20, num_classes)):
+            orig_idx = sorted_indices[i]
+            class_name = class_names[orig_idx]
+            print(f"Class {orig_idx:2d} - {class_name:25s}: P={sorted_precision[i]:.3f}, R={sorted_recall[i]:.3f}, F1={sorted_f1[i]:.3f}, Acc={sorted_accuracy[i]:.3f}, Support={int(sorted_support[i])}")
+        
+        print("\nAVERAGES:")
+        print(f"Macro Average: P={macro_precision:.3f}, R={macro_recall:.3f}, F1={macro_f1:.3f}, Acc={macro_accuracy:.3f}")
+        print(f"Micro Average: P={micro_precision:.3f}, R={micro_recall:.3f}, F1={micro_f1:.3f}, Acc={micro_accuracy:.3f}")
+        print("="*90)
         
         print("Classification report visualization completed!")
     
@@ -662,7 +671,7 @@ class PlottingCallback(pl.Callback):
         
         # Get COCO fine categories for labels
         coco = COCO()
-        fine_categories = coco.get_fine_categories()
+        fine_categories = coco.all_fine_categories
         
         # Create the plot
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -786,7 +795,7 @@ Std AUC: {np.std(auc_scores):.4f}'''
         ax2.set_yticks(y_pos)
         ax2.set_yticklabels(selected_names, fontsize=8)
         ax2.set_xlabel('AUC Score')
-        ax2.set_title('Top 10 and Bottom 10 Classes by AUC')
+        ax2.set_title('Top 10 and Bottom 10 Classes by AUC (Sorted by Performance)')
         ax2.grid(True, alpha=0.3, axis='x')
         
         # Add value labels on bars
