@@ -1,4 +1,4 @@
-import tqdm
+from tqdm import tqdm
 import torch
 from torch import nn
 from torch import optim
@@ -50,21 +50,25 @@ class Pipe:
         self.diffusion_prior.eval()
         N = c_embeds.shape[0] if c_embeds is not None else 1
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, self.device, timesteps)
-
         if c_embeds is not None:
             c_embeds = c_embeds.to(self.device)
-
         h_t = torch.randn(N, self.diffusion_prior.embed_dim, generator=generator, device=self.device)
-
+        
         for _, t in tqdm(enumerate(timesteps)):
-            t = torch.ones(h_t.shape[0], dtype=torch.float, device=self.device) * t
+            # Get the scalar timestep value (same for all samples in batch)
+            t_scalar = t.item() if torch.is_tensor(t) else t
+            
+            # Create tensor of timesteps for the model (one per batch element)
+            t_tensor = torch.ones(h_t.shape[0], dtype=torch.float, device=self.device) * t_scalar
+            
             if guidance_scale == 0 or c_embeds is None:
-                noise_pred = self.diffusion_prior(h_t, t)
+                noise_pred = self.diffusion_prior(h_t, t_tensor)
             else:
-                noise_pred_cond = self.diffusion_prior(h_t, t, c_embeds)
-                noise_pred_uncond = self.diffusion_prior(h_t, t)
+                noise_pred_cond = self.diffusion_prior(h_t, t_tensor, c_embeds)
+                noise_pred_uncond = self.diffusion_prior(h_t, t_tensor)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-            h_t = self.scheduler.step(noise_pred, t.long().item(), h_t, generator=generator).prev_sample
+            
+            # Use scalar timestep for scheduler.step()
+            h_t = self.scheduler.step(noise_pred, t_scalar, h_t, generator=generator).prev_sample
         
         return h_t

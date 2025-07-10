@@ -29,7 +29,7 @@ class DiffusionEmbeddingDataset(Dataset):
         indices = self.img_id_to_indices[img_id]
         image_features = self.image_features[indices][0]
         
-        return eeg_embedding, image_features
+        return { "c_embedding": eeg_embedding, "h_embedding": image_features }
 
 
 # from torch.utils.data import Dataset

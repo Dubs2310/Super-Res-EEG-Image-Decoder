@@ -3,6 +3,7 @@ import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from utils.singletons.coco import COCO
+from utils.datasets.diffusion_embedding import DiffusionEmbeddingDataset
 from sklearn.model_selection import train_test_split
 
 

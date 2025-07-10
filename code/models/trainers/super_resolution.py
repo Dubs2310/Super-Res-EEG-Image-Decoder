@@ -63,6 +63,25 @@ class SuperResolutionTrainerModel(pl.LightningModule):
         self.log("train_batch_loss", self.mean_train_loss)
         return loss
 
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        state_dict = checkpoint["state_dict"]
+        model_state_dict = self.state_dict()
+        is_changed = False
+        for k in state_dict:
+            if k in model_state_dict:
+                if state_dict[k].shape != model_state_dict[k].shape:
+                    print(f"Skip loading parameter: {k}, "
+                                f"required shape: {model_state_dict[k].shape}, "
+                                f"loaded shape: {state_dict[k].shape}")
+                    state_dict[k] = model_state_dict[k]
+                    is_changed = True
+            else:
+                logger.info(f"Dropping parameter {k}")
+                is_changed = True
+
+        if is_changed:
+            checkpoint.pop("optimizer_states", None)
+
     def on_train_epoch_end(self):
         self.log("train_loss", self.mean_train_loss, prog_bar=True)
         self.log("train_mae", self.mean_train_mae, prog_bar=True)

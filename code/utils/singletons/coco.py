@@ -27,11 +27,11 @@ def load_config():
         return {}
 
 CONFIG = load_config()
-DEFAULT_METADATA_PATH = CONFIG.get('coco', {}).get('metadata_path', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\train17-images-metadata.json")
-DEFAULT_IMAGE_DIR = CONFIG.get('coco', {}).get('image_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\images")
-DEFAULT_FEATURES_DIR = CONFIG.get('coco', {}).get('features_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\features")
-DEFAULT_OUTPUT_DIR = CONFIG.get('coco', {}).get('dataframe_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\coco\\dataframes")
-DEFAULT_EEG_PATH = CONFIG.get('eeg', {}).get('preprocessed_dir', "S:\\PolySecLabProjects\\eeg-image-decoding\\data\\all-joined-1\\eeg\\preprocessed")
+DEFAULT_METADATA_PATH = CONFIG.get('coco', {}).get('metadata_path', "/workspace/eeg-image-decoding/data/all-joined-1/coco/train17-images-metadata.json")
+DEFAULT_IMAGE_DIR = CONFIG.get('coco', {}).get('image_dir', "/workspace/eeg-image-decoding/data/all-joined-1/coco/images")
+DEFAULT_FEATURES_DIR = CONFIG.get('coco', {}).get('features_dir', "/workspace/eeg-image-decoding/data/all-joined-1/coco/features")
+DEFAULT_OUTPUT_DIR = CONFIG.get('coco', {}).get('dataframe_dir', "/workspace/eeg-image-decoding/data/all-joined-1/coco/dataframes")
+DEFAULT_EEG_PATH = CONFIG.get('eeg', {}).get('preprocessed_dir', "/workspace/eeg-image-decoding/data/all-joined-1/eeg/preprocessed")
 
 
 class COCO:
